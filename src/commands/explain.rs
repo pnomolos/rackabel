@@ -604,20 +604,26 @@ fn long_form(code: ErrorCode) -> &'static str {
                  file/dir that exists, e.g. `--include assets/icon.png`."
         }
         ErrorCode::IdentifierDrift => {
-            "A stable command identifier appears to have changed between releases.\n\
+            "A stable identifier appears to have changed between releases.\n\
              \n\
-             Command ids are a compatibility contract: Live keys a user's saved state\n\
-             (key bindings, customizations) off the id. Removing or renaming one\n\
-             silently breaks existing users' setups.\n\
+             Stable identifiers are a compatibility contract: Live keys a user's saved\n\
+             state off the extension's identity. Renaming it silently breaks existing\n\
+             users' setups.\n\
              \n\
-             Note: in this milestone command ids are registered in code at runtime and\n\
-             are NOT present in the on-disk manifest, so rackabel cannot yet diff them\n\
-             automatically — validate reports this rule as \"not checkable yet\". When\n\
-             you do rename an id, keep the old id working (or ship a migration) so\n\
-             existing setups survive.\n\
+             What rackabel checks: the SDK manifest carries only five fields (commands\n\
+             and context-menu actions are registered in *code* at runtime, never on\n\
+             disk), so the on-disk identifier rackabel can diff is the extension `name`.\n\
+             pack records a snapshot of the shipped manifest in .rackabel/state.toml;\n\
+             validate compares the current `name` against that snapshot and warns on a\n\
+             rename (\"name `Old` was renamed to `New` (present in 1.1.0) — existing\n\
+             setups may break\"). Command-id drift stays deferred until ids become\n\
+             diffable on disk.\n\
              \n\
-             Under `rackabel validate --strict` this rule is fatal once it has\n\
-             something to compare."
+             To fix:\n\
+               - keep the old `name` (so existing users' saved state still matches), or\n\
+               - ship a migration and accept the break deliberately.\n\
+             \n\
+             Under `rackabel validate --strict` this rename warning is fatal (exit 4)."
         }
         ErrorCode::SkippedIncompatible => {
             "An extension was skipped because its minimumApiVersion exceeds the host's\n\

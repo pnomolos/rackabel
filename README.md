@@ -71,7 +71,11 @@ npm install            # or pnpm install — installs the vendored toolchain
 
 rackabel build         # esbuild bundle (banner baked in) → dist/extension.js + manifest.json
 rackabel deploy        # build-if-stale, then copy into <User Library>/Extensions/<slug>
-rackabel validate      # ship-readiness checklist (exit 4 on failure)
+rackabel validate      # ship-readiness checklist (exit 4 on failure):
+                       #   manifest complete · minimumApiVersion ≤ host · version bumped
+                       #   vs the last pack · CHANGELOG entry · native .node present ·
+                       #   stable-identifier drift (a renamed extension `name` since the
+                       #   last pack warns; --strict makes it fatal)
 rackabel pack -o out/  # production build + validate → a distributable .ablx
 rackabel doctor        # full environment checklist
 ```
@@ -240,6 +244,40 @@ error: <plain-English problem> [RK1301]
 
 Exit codes: `0` ok, `1` build/runtime, `2` usage, `3` environment-not-ready,
 `4` validation. Run `rackabel explain <code>` for the long-form write-up.
+
+**Precedence.** When a command auto-runs several gates (e.g. `deploy --release` runs the
+environment check *and* `validate`), the environment check runs first and
+short-circuits: `3` is returned before `4` is ever reached, and the command returns the
+**single highest-severity** code rather than mixing causes (cause-attribution order:
+environment `3` > validation `4` > build/runtime `1`; usage `2` is caught at parse time).
+So CI can attribute a failure unambiguously — "this machine isn't set up" (`3`) is never
+masked by "my manifest is wrong" (`4`).
+
+## `--json` output
+
+`--json` is supported on `build`, `deploy`, `pack`, `validate`, `doctor`, `dev status`,
+`dev list`, `dev logs`, `dev reload`, `dev test`, `plugin install`, `plugin list`,
+`plugin which`, and `plugin search`. **stdout always carries exactly one JSON value** —
+on success and on failure — so a script can parse it unconditionally:
+
+- **Success** is the command's own object/array (e.g. `validate` → a checklist envelope,
+  `dev test` → `{ "targets": [...], "passed": N, "failed": M }`).
+- **Failure** is also JSON on stdout, never a human frame on stderr with an empty stdout.
+  A *setup/environment* failure (no manifest, bad TOML, no User Library, …) is rendered as
+  a uniform **error envelope**:
+
+  ```json
+  { "ok": false, "code": "RK0001", "exit": 3,
+    "problem": "no manifest found",
+    "location": "looked for rackabel.toml in /path and its parents",
+    "help": "run `rackabel new` to scaffold one, or cd into a project directory" }
+  ```
+
+  (`location` is `null` when the error carries none; `raw` is added only under
+  `--raw`/`--verbose`.) A *domain-shaped* failure whose own envelope already encodes the
+  outcome (`validate`'s checklist with `ok:false`, `dev test`'s `failed:true`, `dev
+  reload`'s result) keeps that single envelope and is **not** double-printed. `exit`
+  mirrors the process exit code.
 
 ## Development
 

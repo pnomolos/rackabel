@@ -239,6 +239,91 @@ fn end_to_end_own_packer() {
     assert_eq!(v["entry"], "dist/extension.js");
 }
 
+/// REAL end-to-end: `pack` records the version + manifest snapshot in state.toml, then
+/// (a) a later `validate` of the SAME project passes the version-bump rule against the
+/// recorded version, and (b) RENAMING the extension trips the stable-identifier-drift
+/// WARNING (the §2 shape). Self-skips without node+esbuild (pack must build first).
+#[test]
+fn pack_records_snapshot_then_validate_detects_drift() {
+    let probe_roots = esbuild_source_roots();
+    let (node, source_root) = match probe_roots
+        .iter()
+        .find_map(|r| usable_node_with_esbuild(r).map(|n| (n, r.clone())))
+    {
+        Some(pair) => pair,
+        None => {
+            eprintln!(
+                "skipping pack_records_snapshot_then_validate_detects_drift: no node+esbuild"
+            );
+            return;
+        }
+    };
+
+    let home = TempDir::new().unwrap();
+    let (_hold, proj) = fixture_project("pack-fixture");
+    assert!(vendor_esbuild_into(&node, &source_root, &proj));
+
+    // Pack once (pure-JS own packer, no Live needed). This must persist the snapshot.
+    rackabel_cmd(home.path(), &proj)
+        .env("ABLETON_EH_NODE", &node)
+        .env("ABLETON_APP", "/nonexistent-ableton-live.app")
+        .args(["pack", "--no-official-cli"])
+        .assert()
+        .success();
+
+    // The snapshot landed in .rackabel/state.toml: version + the manifest name.
+    let state = std::fs::read_to_string(proj.join(".rackabel/state.toml")).unwrap();
+    assert!(
+        state.contains("last_packed_version = \"0.1.0\""),
+        "version not recorded: {state}"
+    );
+    assert!(
+        state.contains("[last_packed_manifest]") && state.contains("name = \"Clip Renamer\""),
+        "manifest snapshot not recorded: {state}"
+    );
+
+    // (a) validate of the unchanged project: drift rule PASSES (name unchanged). The
+    // version-bump rule now FAILS (0.1.0 == last packed) — expected after a pack — so we
+    // only assert the drift line, not overall success.
+    rackabel_cmd(home.path(), &proj)
+        .env("ABLETON_APP", "/nonexistent-ableton-live.app")
+        .arg("validate")
+        .assert()
+        .stdout(predicate::str::contains(
+            "stable identifier `Clip Renamer` unchanged",
+        ));
+
+    // (b) rename the extension + bump the version, then validate: the drift WARNING
+    // fires in the §2 shape (old name → new name, present in the packed version).
+    std::fs::write(
+        proj.join("rackabel.toml"),
+        "[extension]\nname = \"Clip Tool\"\nauthor = \"Jane Doe\"\nversion = \"0.2.0\"\nentry = \"src/extension.ts\"\nminimum_api_version = \"1.0.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(proj.join("CHANGELOG.md"), "## 0.2.0\n- rename\n").unwrap();
+
+    rackabel_cmd(home.path(), &proj)
+        .env("ABLETON_APP", "/nonexistent-ableton-live.app")
+        .arg("validate")
+        .assert()
+        // A rename is a WARNING, not a failure → exit 0 by default.
+        .success()
+        .stdout(predicate::str::contains(
+            "name `Clip Renamer` was renamed to `Clip Tool`",
+        ))
+        .stdout(predicate::str::contains("present in 0.1.0"))
+        .stdout(predicate::str::contains("existing setups may break"));
+
+    // …and `--strict` promotes that rename warning to a validation failure (exit 4).
+    rackabel_cmd(home.path(), &proj)
+        .env("ABLETON_APP", "/nonexistent-ableton-live.app")
+        .args(["validate", "--strict"])
+        .assert()
+        .failure()
+        .code(4)
+        .stderr(predicate::str::contains("RK4005"));
+}
+
 /// Candidate source roots from which esbuild might be resolvable on this machine.
 fn esbuild_source_roots() -> Vec<std::path::PathBuf> {
     let mut roots = Vec::new();

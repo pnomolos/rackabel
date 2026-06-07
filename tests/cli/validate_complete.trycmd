@@ -2,7 +2,9 @@ A complete, ship-ready extension passes validate (exit 0). The env is pinned inl
 so the transcript is deterministic on any machine: ABLETON_APP points at a
 non-existent app (no Live detected → the host-apiVersion rule skips), RACKABEL_HOME
 is isolated, and git config is suppressed (so author inference is not consulted).
-With no prior pack recorded, the version-bump rule also skips-with-note.
+With no prior pack recorded, the version-bump and stable-identifier-drift rules also
+skip-with-note (there is no last-packed snapshot in .rackabel/state.toml to compare
+against until `rackabel pack` records one).
 
 ```
 $ ABLETON_APP=/nonexistent-ableton-live.app RACKABEL_HOME=rk-home GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null rackabel validate
@@ -11,7 +13,7 @@ $ ABLETON_APP=/nonexistent-ableton-live.app RACKABEL_HOME=rk-home GIT_CONFIG_GLO
 [!] version 1.2.0 — skipped (no previous pack recorded; this is the first release)
 [✓] CHANGELOG.md has an entry for 1.2.0
 [!] native dependencies — none declared
-[!] stable-identifier drift — not checkable yet (command ids are registered in code, not the manifest; see `rackabel explain RK4005`)
+[!] stable-identifier drift — skipped (no previous pack recorded to compare against)
 all checks passed
 
 ```

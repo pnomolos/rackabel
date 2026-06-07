@@ -1,0 +1,8 @@
+# Renamed since the last pack (snapshot in .rackabel/state.toml is "Clip Renamer" at
+# 1.1.0) and bumped to 1.2.0 — trips the stable-identifier-drift warning.
+[extension]
+name = "Clip Tool"
+author = "Jane Doe"
+version = "1.2.0"
+entry = "src/extension.ts"
+minimum_api_version = "1.0.0"

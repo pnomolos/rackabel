@@ -1,0 +1,19 @@
+The finalized stable-identifier-drift rule (DESIGN §2). The seeded
+.rackabel/state.toml records a previous pack of "Clip Renamer" at 1.1.0; the current
+rackabel.toml renames the extension to "Clip Tool" and bumps to 1.2.0. validate emits
+the §2 warning shape — the old identifier, the new one, the version it shipped in, and
+the "existing setups may break" clause — as a non-fatal WARNING (exit 0). The
+version-bump rule passes (1.2.0 > 1.1.0). Env is pinned inline (no Live → apiVersion
+rule skips; isolated state root).
+
+```
+$ ABLETON_APP=/nonexistent-ableton-live.app RACKABEL_HOME=rk-home rackabel validate
+[✓] manifest complete
+[!] minimumApiVersion 1.0.0 — skipped (no Ableton Live found to compare against)
+[✓] version 1.2.0 bumped (last packed 1.1.0)
+[✓] CHANGELOG.md has an entry for 1.2.0
+[!] native dependencies — none declared
+warning: name `Clip Renamer` was renamed to `Clip Tool` (present in 1.1.0) — existing setups may break; keep the old name or provide a migration
+1 warning
+
+```

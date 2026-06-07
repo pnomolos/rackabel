@@ -99,18 +99,24 @@ pub fn run(args: &DevReloadArgs, ctx: &Ctx) -> CmdResult<()> {
 
     // Exit-code contract (§7). Failures (activate throws) dominate; then strict skips;
     // then success.
+    // Under `--json` the reload-result object (printed above) is the authoritative
+    // machine output — its `ok`/`failed`/`skipped` arrays carry the cause — so the
+    // exit-coded errors below mark `json_handled` to suppress a second object in `main`.
+    let handled = |e: RkError| if ctx.json { e.json_handled() } else { e };
     if !failed.is_empty() {
         let detail = failed
             .iter()
             .map(|f| format!("{}: {}", f.name, f.error))
             .collect::<Vec<_>>()
             .join("; ");
-        return Err(RkError::of(
-            ErrorCode::ReloadActivateFailed,
-            "an extension threw in activate() on reload",
-            "fix the error above (see `rackabel dev logs <name>`), then reload again",
-        )
-        .at(detail));
+        return Err(handled(
+            RkError::of(
+                ErrorCode::ReloadActivateFailed,
+                "an extension threw in activate() on reload",
+                "fix the error above (see `rackabel dev logs <name>`), then reload again",
+            )
+            .at(detail),
+        ));
     }
     if args.strict && !skipped.is_empty() {
         let detail = skipped
@@ -122,13 +128,15 @@ pub fn run(args: &DevReloadArgs, ctx: &Ctx) -> CmdResult<()> {
         // RK4006 validation class (4). We keep the RK4006 code for the explain entry
         // but force the build/runtime exit class so `--strict` is the CI-fatal toggle
         // it is documented to be.
-        return Err(RkError::new(
-            ErrorCode::SkippedIncompatible,
-            crate::error::ExitClass::BuildRuntime,
-            "an extension was skipped as host-incompatible (--strict)",
-            "lower the extension's minimumApiVersion or drop --strict to reload the rest",
-        )
-        .at(detail));
+        return Err(handled(
+            RkError::new(
+                ErrorCode::SkippedIncompatible,
+                crate::error::ExitClass::BuildRuntime,
+                "an extension was skipped as host-incompatible (--strict)",
+                "lower the extension's minimumApiVersion or drop --strict to reload the rest",
+            )
+            .at(detail),
+        ));
     }
     Ok(())
 }

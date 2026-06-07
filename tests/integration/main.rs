@@ -27,6 +27,11 @@ mod dev_test;
 #[cfg(unix)]
 mod dev_watch;
 mod doctor;
+// Exit-code precedence matrix (DESIGN §7) — the ship-quality centerpiece (SHIP-QUALITY).
+mod exit_codes;
+// `--json` envelope audit: success + failure object shape, stable keys, error envelope
+// on stdout (DESIGN §7) (SHIP-QUALITY).
+mod json_envelope;
 mod new;
 mod pack;
 // Tier-1 template rendering (`new --template`) + `new --update` 3-way merge (milestone

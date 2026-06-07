@@ -119,9 +119,52 @@ fn pack_extension(project: &Project, args: &PackArgs, ctx: &Ctx) -> CmdResult<()
         )?
     };
 
-    // --- 5. Report + install instructions. ---
+    // --- 5. Record the packed version + a manifest snapshot for drift detection. ---
+    // This is the writer the §2 version-bump and stable-identifier-drift rules read
+    // back on the next pack/validate: the version we just shipped, and a snapshot of the
+    // manifest's stable identifiers (the extension `name`, …) as shipped.
+    record_pack(project, &ext, ctx);
+
+    // --- 6. Report + install instructions. ---
     report_success(&outputs, use_official, ctx);
     Ok(())
+}
+
+/// Persist `last_packed_version` + the SDK-manifest snapshot to `.rackabel/state.toml`
+/// after a successful pack (DESIGN §2). Best-effort: a state-write failure never fails a
+/// pack that already produced a valid artifact (a green pack must not turn red over a
+/// sidecar write), but it IS surfaced as a `[!]` note under human output so the user
+/// knows drift/version-bump checks won't see this pack.
+fn record_pack(project: &Project, ext: &ResolvedExtension, ctx: &Ctx) {
+    let mut state = crate::manifest::state::load(&project.root).unwrap_or_default();
+    state.last_packed_version = Some(ext.version.to_string());
+    // Snapshot the generated manifest's stable identifiers. The build (step 1) wrote a
+    // current manifest.json; prefer reading it back (it is exactly what shipped), and
+    // fall back to the resolved extension if the read fails for any reason.
+    let snapshot = crate::manifest::sdk_manifest::read(&project.root)
+        .map(|m| crate::manifest::state::PackedManifestSnapshot {
+            name: m.name,
+            author: m.author,
+            entry: m.entry,
+            version: m.version,
+            minimum_api_version: m.minimum_api_version,
+        })
+        .unwrap_or_else(|_| crate::manifest::state::PackedManifestSnapshot {
+            name: ext.name.clone(),
+            author: ext.author.clone(),
+            entry: crate::services::esbuild::DIST_ENTRY.to_string(),
+            version: ext.version.to_string(),
+            minimum_api_version: ext.minimum_api_version.to_string(),
+        });
+    state.last_packed_manifest = Some(snapshot);
+    if crate::manifest::state::save(&project.root, &state).is_err() && ctx.echo_on() {
+        ui::frame::emit(
+            ui::frame::Symbol::Warn,
+            "could not record this pack in .rackabel/state.toml — version-bump and \
+             stable-identifier-drift checks won't see it next time",
+            ctx,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

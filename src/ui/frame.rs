@@ -93,6 +93,41 @@ pub fn print_error(err: &RkError, ctx: &Ctx) {
     let _ = writeln!(out, "{}", Style::Dim.paint(&hint, mode));
 }
 
+/// Print the error as a single JSON object (the `--json` error envelope, DESIGN §7).
+///
+/// When `--json` is set, a failure must surface as a machine-readable object on
+/// **stdout** — never a human three-part frame on stderr mixed with JSON on stdout.
+/// The envelope is stable-keyed (`ok`/`code`/`exit`/`problem`/`location`/`help`) so a
+/// CI consumer can branch on `code`/`exit` deterministically; `location` is `null`
+/// when the error carries none. The raw internal chain is included only under
+/// `--raw`/`--verbose` (the same gate the human frame uses).
+///
+/// `ok` is always `false` here (this only renders the failure path); a successful
+/// command emits its own `{"ok": true, …}` object. A serialization failure falls
+/// back to the human frame so a failure is never silently swallowed.
+pub fn print_error_json(err: &RkError, ctx: &Ctx) {
+    let mut obj = serde_json::json!({
+        "ok": false,
+        "code": err.code.as_str(),
+        "exit": err.class as u8,
+        "problem": err.problem,
+        "location": err.location,
+        "help": err.help,
+    });
+    if (ctx.raw || ctx.verbose)
+        && let Some(raw) = &err.raw
+        && let Some(map) = obj.as_object_mut()
+    {
+        map.insert("raw".into(), serde_json::Value::String(format!("{raw:#}")));
+    }
+    // The envelope is the command's machine output → stdout, mirroring the success
+    // objects every `--json` command prints to stdout.
+    match serde_json::to_string_pretty(&obj) {
+        Ok(s) => println!("{s}"),
+        Err(_) => print_error(err, ctx),
+    }
+}
+
 /// Emit a status line: `[✓] <message>` to stdout.
 pub fn emit(sym: Symbol, message: &str, ctx: &Ctx) {
     println!("{} {message}", sym.painted(ctx.color));

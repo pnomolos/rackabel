@@ -85,13 +85,17 @@ pub fn run(args: &DevTestArgs, ctx: &Ctx) -> CmdResult<()> {
     // machine). The human/JSON report already went to stdout; the frame goes to stderr,
     // so a `--json` consumer reading stdout still gets the clean envelope.
     if reports.iter().any(TargetReport::is_failure) {
-        return Err(RkError::new(
+        let err = RkError::new(
             ErrorCode::TestFailed,
             ExitClass::BuildRuntime,
             "one or more targets had failing tests",
             "read the failures above (rerun with --raw to see the full runner output), \
              fix them, and run `rackabel dev test` again",
-        ));
+        );
+        // Under `--json` the §3.8 envelope (printed by `emit`) already carries
+        // `passed`/`failed` per target — it is the authoritative machine output, so
+        // suppress a second JSON error object in `main`.
+        return Err(if ctx.json { err.json_handled() } else { err });
     }
     Ok(())
 }
