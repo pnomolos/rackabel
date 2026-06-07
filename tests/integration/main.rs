@@ -120,6 +120,26 @@ fn both_kinds_is_ambiguous() {
         .stderr(predicate::str::contains("RK0002"));
 }
 
+/// A syntactically-malformed rackabel.toml is a parse error (RK0003, exit 3) end to
+/// end through a command, distinct from the both-kinds-declared (RK0002) case.
+#[test]
+fn malformed_manifest_is_parse_error() {
+    let home = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    // Unterminated string => invalid TOML.
+    std::fs::write(
+        work.path().join("rackabel.toml"),
+        "[extension]\nname = \"unterminated\n",
+    )
+    .unwrap();
+    rackabel_cmd(home.path(), work.path())
+        .arg("build")
+        .assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("RK0003"));
+}
+
 /// The fake Live fixture is detected via `--live` (the testability seam): a
 /// `deploy --dry-run` of an extension resolves the target and prints the plan,
 /// proving discovery + dispatch + User-Library resolution wire up end-to-end without

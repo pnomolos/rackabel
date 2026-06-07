@@ -74,6 +74,7 @@ pub fn render(root: &Path, data: &ScaffoldData) -> CmdResult<()> {
     write_file(root, "tsconfig.json", &tsconfig_json())?;
     write_file(root, ".env", &env_file())?;
     write_file(root, "README.md", &readme(data))?;
+    write_file(root, "CHANGELOG.md", &changelog(data))?;
     write_file(root, SRC_ENTRY, &extension_ts(data))?;
     Ok(())
 }
@@ -312,6 +313,25 @@ Run `rackabel doctor` if anything looks off.
     )
 }
 
+/// `CHANGELOG.md` — a starter changelog with an entry for the scaffolded version, so a
+/// freshly-created project passes `rackabel validate`/`pack` out of the box (DESIGN §2
+/// validate requires a CHANGELOG entry for the current version; the scaffold writes
+/// version 0.1.0 in rackabel.toml).
+fn changelog(data: &ScaffoldData) -> String {
+    format!(
+        "\
+# Changelog
+
+All notable changes to {name} are recorded here.
+
+## 0.1.0
+
+- Initial release.
+",
+        name = data.display_name
+    )
+}
+
 /// `src/extension.ts` — the default template adds one working right-click action plus
 /// one command (DESIGN §2: "a working right-click action" + "one command"), pure-JS
 /// only (no UI/vite). `--minimal` emits a bare `activate` skeleton instead.
@@ -441,6 +461,10 @@ mod tests {
         assert!(root.join("tsconfig.json").is_file());
         assert!(root.join(".gitignore").is_file());
         assert!(root.join(".env").is_file());
+        // A starter CHANGELOG with an entry for the scaffolded version, so the project
+        // passes validate/pack out of the box (D-37).
+        let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+        assert!(changelog.contains("## 0.1.0"));
         assert!(root.join("src/extension.ts").is_file());
         // No build.ts and no hand-written manifest.json — rackabel owns those.
         assert!(!root.join("build.ts").exists());

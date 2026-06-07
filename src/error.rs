@@ -24,8 +24,8 @@ pub enum ExitClass {
 
 /// Stable error identifiers for `rackabel explain`. Format: `RK` + 4 digits,
 /// grouped by thousands so the code itself hints at the exit class (DESIGN §4 code
-/// table). `RK0xxx`/`RK02xx`/`RK03xx` = environment (exit 3), `RK1xxx` =
-/// build/runtime (exit 1), `RK4xxx` = validation (exit 4).
+/// table). `RK00xx`/`RK02xx`/`RK03xx` = environment (exit 3), `RK01xx` = usage
+/// (exit 2), `RK1xxx` = build/runtime (exit 1), `RK4xxx` = validation (exit 4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorCode {
     // -- environment / project setup (exit 3) --
@@ -35,6 +35,13 @@ pub enum ErrorCode {
     AmbiguousKind,
     /// Manifest parse error (bad TOML / unknown field).
     ManifestParse,
+    // -- usage (exit 2) --
+    /// A command was invoked incorrectly (missing required argument, a name that
+    /// already exists, an unsupported flag value). The frame's `help:` line names the
+    /// exact fix; this code keeps the displayed `RKxxxx` in the same exit class (2) as
+    /// the error, so `rackabel explain` returns relevant prose instead of an unrelated
+    /// validation entry.
+    UsageError,
     // -- toolkit (exit 3) --
     /// Extensions toolkit (SDK/CLI tarball) not found.
     ToolkitNotFound,
@@ -84,6 +91,7 @@ impl ErrorCode {
             Self::NoManifest => "RK0001",
             Self::AmbiguousKind => "RK0002",
             Self::ManifestParse => "RK0003",
+            Self::UsageError => "RK0101",
             Self::ToolkitNotFound => "RK0201",
             Self::ToolkitVersionMismatch => "RK0202",
             Self::UserLibraryAmbiguous => "RK0301",
@@ -114,6 +122,7 @@ impl ErrorCode {
     /// The exit class this code maps to. Keeps the frame and the exit code in sync.
     pub fn class(self) -> ExitClass {
         match self {
+            Self::UsageError => ExitClass::Usage,
             Self::NoManifest
             | Self::AmbiguousKind
             | Self::ManifestParse
@@ -143,6 +152,7 @@ impl ErrorCode {
         Self::NoManifest,
         Self::AmbiguousKind,
         Self::ManifestParse,
+        Self::UsageError,
         Self::ToolkitNotFound,
         Self::ToolkitVersionMismatch,
         Self::UserLibraryAmbiguous,

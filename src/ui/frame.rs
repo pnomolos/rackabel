@@ -58,7 +58,16 @@ pub fn print_error(err: &RkError, ctx: &Ctx) {
     let _ = writeln!(out, "{}", Style::Bad.paint(&head, mode));
 
     if let Some(loc) = &err.location {
-        let _ = writeln!(out, "  --> {loc}");
+        // A location is usually one line (a path / value), but some errors carry a
+        // multi-line body (e.g. a compiler's own file:line + caret diagnostic). Render
+        // the first line after `-->` and indent any continuation lines to line up.
+        let mut loc_lines = loc.lines();
+        if let Some(first) = loc_lines.next() {
+            let _ = writeln!(out, "  --> {first}");
+            for line in loc_lines {
+                let _ = writeln!(out, "      {line}");
+            }
+        }
     }
     let help_label = Style::Heading.paint("help:", mode);
     // Indent continuation lines of a multi-line help block to line up under the text.

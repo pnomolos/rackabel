@@ -92,9 +92,8 @@ fn new_extension(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     //    not already exist (matches the device path + create-extension's empty-dir guard).
     let root = ctx.cwd.join(&wiz.dir_name);
     if root.exists() {
-        return Err(RkError::new(
-            ErrorCode::ManifestIncomplete,
-            ExitClass::Usage,
+        return Err(RkError::of(
+            ErrorCode::UsageError,
             format!("`{}` already exists", wiz.dir_name),
             "choose a different name, or remove the existing directory",
         )
@@ -221,9 +220,8 @@ fn run_wizard(args: &NewArgs, ctx: &Ctx) -> CmdResult<Wizard> {
             // since the name is positional) — unless a remembered answer supplies one.
             let default = remembered.as_ref().and_then(|r| r.name.clone());
             if accept_defaults && default.is_none() {
-                return Err(RkError::new(
-                    ErrorCode::ManifestIncomplete,
-                    ExitClass::Usage,
+                return Err(RkError::of(
+                    ErrorCode::UsageError,
                     "a project name is required",
                     "pass it as the first argument, e.g. `rackabel new <name>` \
                      (running with --no-input, so I won't prompt for it)",
@@ -269,7 +267,10 @@ fn run_wizard(args: &NewArgs, ctx: &Ctx) -> CmdResult<Wizard> {
         .unwrap_or_else(|| DEFAULT_TEMPLATE.to_string());
     // We surface the template only as an echo, not a real prompt in 0.2 (there is a
     // single default template); a real pick-list lands with tier-1 templates in 0.4.
-    if ctx.echo_on() && !ctx.no_input && args.template.is_none() {
+    // The "Enter to accept" hint only makes sense interactively, so we suppress it when
+    // accepting defaults non-interactively (`--yes`/`--no-input`) — otherwise it leaks a
+    // prompt-style line into a non-interactive run (which never waits for Enter).
+    if ctx.echo_on() && !accept_defaults && args.template.is_none() {
         ui::frame::echo_resolved(
             "Template",
             "Default (a working right-click action)",
@@ -378,8 +379,26 @@ fn maybe_auto_build(root: &Path, dir_name: &str, ctx: &Ctx) {
         return;
     }
 
-    // A usable node exists: build the project. We reuse the shared build entry so the
-    // banner + manifest generation + validation are identical to `rackabel build`.
+    // A usable node exists, but the project's dependencies (esbuild + the SDK/CLI
+    // file: deps) are not installed yet — `new` vendors the tarballs and pins them in
+    // package.json but does not run the install. Building now would fail with the scary
+    // RK1301 "couldn't find esbuild" frame on EVERY brand-new project (DESIGN §1's
+    // "first thing they see is error:" trap). So when node_modules is absent we
+    // friendly-skip with the exact next steps instead of dead-ending on a red error.
+    if !root.join("node_modules").exists() {
+        if ctx.echo_on() {
+            println!("  (skipped the build — the project's dependencies aren't installed yet.)");
+            println!(
+                "  next:  cd {dir_name} && npm install   # vendored offline, no internet needed"
+            );
+            println!("         then `rackabel build` (or `rackabel dev` to build + run in Live).");
+        }
+        return;
+    }
+
+    // A usable node exists and deps are installed: build the project. We reuse the
+    // shared build entry so the banner + manifest generation + validation are identical
+    // to `rackabel build`.
     let project = match crate::manifest::Project::discover(root) {
         Ok(p) => p,
         Err(_) => return, // We just wrote rackabel.toml; this should not happen.
@@ -420,9 +439,8 @@ fn is_remote_template(tref: &str) -> bool {
 
 /// The framed "remote templates land in 0.4" error.
 fn remote_template_unsupported(tref: &str) -> RkError {
-    RkError::new(
-        ErrorCode::ManifestIncomplete,
-        ExitClass::Usage,
+    RkError::of(
+        ErrorCode::UsageError,
         "remote templates aren't supported yet",
         "remote template refs (gh:user/repo, @scope/name) arrive in the 0.4 milestone — \
          for now omit --template to use the built-in default, or pass a local path",
@@ -499,9 +517,8 @@ fn new_device(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
-            return Err(RkError::new(
-                ErrorCode::ManifestIncomplete,
-                ExitClass::Usage,
+            return Err(RkError::of(
+                ErrorCode::UsageError,
                 "a device project needs a name",
                 "pass it: `rackabel new <name> --kind device`",
             ));
@@ -512,9 +529,8 @@ fn new_device(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
 
     let root = ctx.cwd.join(&name);
     if root.exists() {
-        return Err(RkError::new(
-            ErrorCode::ManifestIncomplete,
-            ExitClass::Usage,
+        return Err(RkError::of(
+            ErrorCode::UsageError,
             format!("`{name}` already exists"),
             "choose a different name or remove the existing directory",
         )
@@ -544,7 +560,7 @@ fn new_device(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     println!("Created `{name}` ({})", manifest_name(dev_kind));
     println!("\n  cd {name}");
     println!("  rackabel build      # assemble the .amxd");
-    println!("  rackabel install    # copy it into Ableton's User Library");
+    println!("  rackabel deploy     # copy it into Ableton's User Library");
     Ok(())
 }
 

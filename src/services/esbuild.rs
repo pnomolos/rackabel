@@ -361,14 +361,28 @@ esbuild.build(cfg)
         .at(project_root.display().to_string()));
     }
     if out.status != Some(0) {
-        return Err(RkError::new(
+        // Surface esbuild's own formatted diagnostic (file:line + caret) as the `-->`
+        // body of the frame so a musician with a typo gets actionable info BY DEFAULT —
+        // the `help:` line ("fix the error shown above") would otherwise reference
+        // content that only appeared under --verbose/--raw. esbuild writes that clean
+        // diagnostic to stderr; the full stdout+stderr is still kept behind --raw for
+        // the rare case the message alone isn't enough.
+        let diagnostic = {
+            let s = out.stderr.trim();
+            if s.is_empty() { out.stdout.trim() } else { s }
+        };
+        let mut err = RkError::new(
             ErrorCode::BuildFailed,
             ExitClass::BuildRuntime,
             "esbuild failed to bundle the extension",
             "fix the error shown above (a missing import or a syntax error in your \
              source), then rerun the build",
         )
-        .raw(anyhow::anyhow!("{}{}", out.stdout, out.stderr)));
+        .raw(anyhow::anyhow!("{}{}", out.stdout, out.stderr));
+        if !diagnostic.is_empty() {
+            err = err.at(diagnostic.to_string());
+        }
+        return Err(err);
     }
     Ok(())
 }
@@ -596,16 +610,20 @@ fn fnv1a_hex(bytes: &[u8]) -> String {
     format!("{:012x}", hash & 0xffff_ffff_ffff)
 }
 
-/// Write `content` to a uniquely-named temp file and return its path.
+/// Write `content` to a freshly-created temp file and return its path.
+///
+/// The file is created with O_EXCL semantics (`create_new`) so it never follows or
+/// clobbers a pre-existing file/symlink someone may have planted at the (otherwise
+/// predictable) path in the world-writable temp dir, and on unix it is created mode
+/// 0600. On the rare name collision we retry with a fresh suffix.
 fn write_temp(prefix: &str, suffix: &str, content: &str) -> CmdResult<PathBuf> {
+    use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+
+    let dir = std::env::temp_dir();
     let pid = std::process::id();
-    let path = std::env::temp_dir().join(format!("{prefix}{pid}-{nanos}{suffix}"));
-    std::fs::write(&path, content).map_err(|e| {
+
+    let mk_err = |path: &Path, e: std::io::Error| {
         RkError::new(
             ErrorCode::BuildFailed,
             ExitClass::BuildRuntime,
@@ -614,8 +632,43 @@ fn write_temp(prefix: &str, suffix: &str, content: &str) -> CmdResult<PathBuf> {
         )
         .at(path.display().to_string())
         .raw(e.into())
-    })?;
-    Ok(path)
+    };
+
+    // A few attempts in case the exclusive create races another process at the same
+    // nanosecond; each attempt uses a fresh timestamp so the name differs.
+    let mut last_err: Option<std::io::Error> = None;
+    let mut path = dir.join(format!("{prefix}{pid}{suffix}"));
+    for _ in 0..8 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        path = dir.join(format!("{prefix}{pid}-{nanos}{suffix}"));
+
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&path) {
+            Ok(mut f) => {
+                f.write_all(content.as_bytes())
+                    .map_err(|e| mk_err(&path, e))?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(mk_err(&path, e)),
+        }
+    }
+    Err(mk_err(
+        &path,
+        last_err.unwrap_or_else(|| std::io::Error::other("could not create a temp file")),
+    ))
 }
 
 /// A synthetic outcome for `--print-config`/`--dry-run` (nothing was built).

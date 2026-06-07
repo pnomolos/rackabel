@@ -196,7 +196,11 @@ fn find_dot_node(pkg_root: &Path) -> Option<PathBuf> {
         let entries = std::fs::read_dir(dir).ok()?;
         for entry in entries.flatten() {
             let path = entry.path();
-            let file_type = entry.file_type().ok()?;
+            // Skip an entry we can't stat (e.g. a broken symlink) instead of aborting
+            // the whole walk — one bad entry must not produce a false "no .node found".
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
             if file_type.is_dir() {
                 if path.file_name().and_then(|s| s.to_str()) == Some("node_modules") {
                     continue;
@@ -337,8 +341,12 @@ pub fn fix(project: &Project, ext: &ResolvedExtension, ctx: &Ctx) -> CmdResult<(
     //    nothing to approve — so we only surface a hard failure on `rebuild`.
     run_pnpm(&pnpm, &["approve-builds"], &project.root, ctx)?;
 
-    // 2. Rebuild the declared native deps so their `.node` binaries are produced.
-    let mut rebuild_args: Vec<&str> = vec!["rebuild"];
+    // 2. Rebuild the declared native deps so their `.node` binaries are produced. A `--`
+    //    separator ends pnpm's own option parsing so a dep name is never mistaken for a
+    //    flag (e.g. a manifest entry that begins with `-`); the names come from the
+    //    author's rackabel.toml and are passed as argv (no shell), so this is the only
+    //    way one could be misinterpreted.
+    let mut rebuild_args: Vec<&str> = vec!["rebuild", "--"];
     for dep in &ext.native_deps {
         rebuild_args.push(dep);
     }

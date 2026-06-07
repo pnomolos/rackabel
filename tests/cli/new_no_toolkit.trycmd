@@ -3,7 +3,7 @@ not dead-end: numbered steps, the beta URL, the exact re-run command, the pick-f
 fallback, and the "answers remembered" line. Exit 3 (environment not ready).
 
 ```
-$ rackabel new clip-renamer --no-input --sdk-dir ./no-toolkit-here
+$ RACKABEL_HOME=rk-home rackabel new clip-renamer --no-input --sdk-dir ./no-toolkit-here
 ? 3
   Looking for the Ableton Extensions toolkit…
 error: Couldn't find the Ableton Extensions toolkit download. [RK0201]

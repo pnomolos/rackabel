@@ -34,6 +34,7 @@ fn short_title(code: ErrorCode) -> &'static str {
         ErrorCode::NoManifest => "No rackabel.toml found",
         ErrorCode::AmbiguousKind => "Project has both or neither [extension]/[device]",
         ErrorCode::ManifestParse => "rackabel.toml could not be parsed",
+        ErrorCode::UsageError => "Command invoked incorrectly",
         ErrorCode::ToolkitNotFound => "Extensions toolkit (SDK/CLI) not found",
         ErrorCode::ToolkitVersionMismatch => "Toolkit version mismatch vs [toolchain].sdk",
         ErrorCode::UserLibraryAmbiguous => "Multiple User Libraries; cannot pick under --no-input",
@@ -62,6 +63,19 @@ fn short_title(code: ErrorCode) -> &'static str {
 /// drift.
 fn long_form(code: ErrorCode) -> &'static str {
     match code {
+        ErrorCode::UsageError => {
+            "The command was invoked incorrectly — for example a required argument was\n\
+             missing, a project name already exists, or a flag was given a value that\n\
+             isn't supported yet.\n\
+             \n\
+             This is a usage error (exit 2), not a problem with your project or your\n\
+             machine. The framed `help:` line above names the exact fix for the specific\n\
+             case (the argument to pass, a different name to choose, or the flag to drop).\n\
+             \n\
+             To fix:\n\
+               - follow the `help:` line printed with the error, or\n\
+               - run `rackabel <command> --help` to see the command's accepted arguments."
+        }
         ErrorCode::NoManifest => {
             "rackabel looks for a rackabel.toml in the current directory and its\n\
              parents. None was found. Run `rackabel new` to scaffold a project, or\n\

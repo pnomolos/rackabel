@@ -5,8 +5,8 @@ default, so omitting it is a usage error (exit 2), naming the positional argumen
 ```
 $ rackabel new --no-input
 ? 2
-error: a project name is required [RK4001]
+error: a project name is required [RK0101]
   help: pass it as the first argument, e.g. `rackabel new <name>` (running with --no-input, so I won't prompt for it)
-(run `rackabel explain RK4001` for details)
+(run `rackabel explain RK0101` for details)
 
 ```

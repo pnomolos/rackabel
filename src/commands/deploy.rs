@@ -347,20 +347,21 @@ fn mtime(path: &Path) -> Option<std::time::SystemTime> {
 /// Record the deploy timestamp in `.rackabel/state.toml` (best-effort).
 fn record_deploy(root: &Path) {
     if let Ok(mut state) = manifest::state::load(root) {
-        state.deployed_at = Some(now_rfc3339());
+        state.deployed_at = Some(now_epoch_marker());
         let _ = manifest::state::save(root, &state);
     }
 }
 
-/// A minimal RFC3339-ish UTC timestamp without pulling in a time crate.
-fn now_rfc3339() -> String {
+/// A deterministic deploy timestamp without pulling in a time crate: an `@<epoch-seconds>`
+/// marker. Stored only for human reference / drift tooling; epoch-seconds is sufficient
+/// and avoids a date-formatting dependency. (This is intentionally NOT RFC3339 — the
+/// `@` prefix makes the format unambiguous.)
+fn now_epoch_marker() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    // Stored only for human reference / drift tooling; epoch-seconds is sufficient and
-    // deterministic to format. Render as a `@<epoch>` marker so it is unambiguous.
     format!("@{secs}")
 }
 

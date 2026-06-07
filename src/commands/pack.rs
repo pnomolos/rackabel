@@ -39,11 +39,6 @@ use crate::services::esbuild::{self, BuildOptions, DIST_ENTRY};
 use crate::services::{node, official_cli, packer};
 use crate::ui;
 
-/// The SDK's statically-declared API versions (newest-first), SPEC A §2. Used as the
-/// only on-disk source for the `minimumApiVersion ≤ host` validation gate when no live
-/// host can be queried.
-const SDK_API_VERSIONS: &[&str] = &["1.0.0"];
-
 pub fn run(args: &PackArgs, ctx: &Ctx) -> CmdResult<()> {
     let project = Project::discover_cwd(ctx)?;
     match project.kind()? {
@@ -106,7 +101,11 @@ fn pack_extension(project: &Project, args: &PackArgs, ctx: &Ctx) -> CmdResult<()
     esbuild::build_extension(project, &build_opts, ctx)?;
 
     // --- 2. Validate (auto-run; any failure ⇒ exit 4). ---
-    validate_for_ship(project, &ext, ctx)?;
+    // Delegate to the full `validate` checklist so pack's "validation passed" means
+    // exactly what `rackabel validate` means — never ship an artifact `validate` would
+    // reject (DESIGN §2 pack). See D-26: this replaces the earlier inline subset now
+    // that `commands::validate::run` is a real, callable command.
+    crate::commands::validate::run(&crate::cli::ValidateArgs { strict: false }, ctx)?;
 
     // --- 3/4. Pack via the chosen path. ---
     let outputs = if use_official {
@@ -261,66 +260,6 @@ fn resolve_node(ctx: &Ctx) -> CmdResult<node::NodeRuntime> {
 }
 
 // ---------------------------------------------------------------------------
-// The ship-validation gate (a focused subset; see module note).
-// ---------------------------------------------------------------------------
-
-/// Validate the extension is shippable: manifest fields complete + `minimumApiVersion`
-/// not above the SDK's newest supported version. Any failure is a validation error
-/// (exit 4) so a distributable that fails the gate is never produced.
-fn validate_for_ship(project: &Project, ext: &ResolvedExtension, ctx: &Ctx) -> CmdResult<()> {
-    // Manifest completeness (the five SDK fields). Author is inferred-empty-tolerant at
-    // build time, but a *shipped* artifact must name an author (RK4001).
-    let mut missing: Vec<&str> = Vec::new();
-    if ext.name.trim().is_empty() {
-        missing.push("name");
-    }
-    if ext.author.trim().is_empty() {
-        missing.push("author");
-    }
-    if !missing.is_empty() {
-        return Err(RkError::of(
-            ErrorCode::ManifestIncomplete,
-            format!(
-                "this extension can't be packed yet: missing {}",
-                missing.join(", ")
-            ),
-            "set the missing field(s) in [extension] in rackabel.toml, then rerun",
-        )
-        .at(project
-            .root
-            .join(crate::manifest::MANIFEST_NAME)
-            .display()
-            .to_string()));
-    }
-
-    // minimumApiVersion ≤ the SDK's newest supported version (the only on-disk source,
-    // SPEC A §2). A higher floor means the extension would refuse to load.
-    let newest = SDK_API_VERSIONS
-        .first()
-        .and_then(|s| semver::Version::parse(s).ok())
-        .unwrap_or_else(|| semver::Version::new(1, 0, 0));
-    if ext.minimum_api_version > newest {
-        return Err(RkError::of(
-            ErrorCode::ApiVersionTooHigh,
-            format!(
-                "minimumApiVersion {} is newer than the SDK supports ({newest})",
-                ext.minimum_api_version
-            ),
-            "lower [extension].minimum_api_version, or update the vendored SDK",
-        )
-        .at(format!(
-            "minimum_api_version = \"{}\"",
-            ext.minimum_api_version
-        )));
-    }
-
-    if ctx.echo_on() {
-        ui::frame::emit(ui::frame::Symbol::Good, "validation passed", ctx);
-    }
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
 // Reporting.
 // ---------------------------------------------------------------------------
 
@@ -422,58 +361,9 @@ mod tests {
         }
     }
 
-    fn test_ctx(cwd: &Path) -> Ctx {
-        Ctx {
-            no_input: true,
-            json: true, // quiet echoes in unit tests
-            verbose: false,
-            raw: false,
-            color: crate::ui::color::ColorMode::Never,
-            color_err: crate::ui::color::ColorMode::Never,
-            cwd: cwd.to_path_buf(),
-            rackabel_home: cwd.join(".rackabel-home"),
-            home: cwd.to_path_buf(),
-            ableton_app: None,
-            ableton_user_library: None,
-            ableton_eh_mod: None,
-            ableton_eh_node: None,
-            ableton_extensions_dir: None,
-            ableton_storage_base: None,
-        }
-    }
-
     fn project_at(dir: &Path) -> Project {
         fs::write(dir.join("rackabel.toml"), "[extension]\n").unwrap();
         Project::discover(dir).unwrap()
-    }
-
-    #[test]
-    fn validate_rejects_empty_author() {
-        let tmp = tempdir().unwrap();
-        let proj = project_at(tmp.path());
-        let ctx = test_ctx(tmp.path());
-        let e = ext("x", "", (1, 0, 0), vec![]);
-        let err = validate_for_ship(&proj, &e, &ctx).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ManifestIncomplete);
-    }
-
-    #[test]
-    fn validate_rejects_high_api_version() {
-        let tmp = tempdir().unwrap();
-        let proj = project_at(tmp.path());
-        let ctx = test_ctx(tmp.path());
-        let e = ext("x", "Jane", (2, 0, 0), vec![]);
-        let err = validate_for_ship(&proj, &e, &ctx).unwrap_err();
-        assert_eq!(err.code, ErrorCode::ApiVersionTooHigh);
-    }
-
-    #[test]
-    fn validate_passes_complete_manifest() {
-        let tmp = tempdir().unwrap();
-        let proj = project_at(tmp.path());
-        let ctx = test_ctx(tmp.path());
-        let e = ext("x", "Jane", (1, 0, 0), vec![]);
-        assert!(validate_for_ship(&proj, &e, &ctx).is_ok());
     }
 
     #[test]

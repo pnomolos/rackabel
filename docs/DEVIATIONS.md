@@ -314,28 +314,38 @@ correctness gates that *do* generalize (bundle exists, `node --check` parses it 
 already enforced by the shared `build` step that `pack` runs first) are kept; the 10KB
 floor stays a build-time warning (see D-8).
 
-### D-26. `pack` runs an inline ship-validation subset, not `commands::validate::run` (DESIGN §2 pack)
+### D-26. `pack` delegates to `commands::validate::run` for the full ship checklist (DESIGN §2 pack)
 
 DESIGN §2 requires `pack` to auto-run `validate` and fail with exit 4 before producing
-a distributable. In 0.2 there is no shared, callable validation **service** in the
-frozen API surface — the logic lives in `commands/validate.rs`, owned by another agent
-and still a foundation stub. To keep pack's "never ship a failing artifact" gate real
-*now* without reaching into another owner's file, `pack` runs the validation subset it
-needs inline: manifest completeness (name + author non-empty → `RK4001`) and
-`minimumApiVersion ≤` the SDK's newest supported version (`RK4002`, the only on-disk
-source per SPEC A §2). When the validate-owner exposes a callable gate, `pack` should
-delegate to it for the full checklist (version-bump, identifier drift, native `.node`
-presence). No spec behavior is dropped — only a narrower subset runs until the shared
-gate exists.
+a distributable, so pack's gate must mean exactly what `rackabel validate` means.
+
+The original 0.2 foundation had no shared, callable validation service (validate was a
+stub), so pack ran an inline *subset* (manifest completeness + `minimumApiVersion`).
+That subset skipped the CHANGELOG and version-bump rules, which let `pack` succeed and
+print "validation passed" on a project that standalone `rackabel validate` rejected
+(e.g. a fresh scaffold with no CHANGELOG) — i.e. it could ship an artifact validate
+would fail. That divergence is now fixed: `commands::validate::run` is a real command,
+so `pack` calls it directly (the same way `deploy --release` does, D-23) and runs the
+*full* checklist (manifest completeness, `minimumApiVersion ≤ host`, version-bump,
+CHANGELOG entry, native `.node` presence, identifier drift). The inline subset and its
+`SDK_API_VERSIONS` constant were removed. To keep the "passes out of the box" promise
+(D-37), `new` now also scaffolds a starter `CHANGELOG.md` with an entry for the
+scaffolded version. No spec behavior is dropped — pack's gate is now a superset of the
+old one and identical to `validate`.
 
 ### D-27. `zip` crate added for the own packer (SPEC C §2)
 
 SPEC C §2 anticipates a Rust zip crate ("e.g. `zip`") for the own packer. The
 foundation `Cargo.toml` did not yet include one, so the pack branch adds
 `zip = { version = "2", default-features = false, features = ["deflate"] }` (the
-flate2-backed deflate path, matching the existing `flate2`/`tar` toolkit deps). Byte
-identity with `archiver` is explicitly **not** a contract (SPEC A §1.4 closing note);
-the member layout is. The integrator should keep this dependency line.
+flate2-backed deflate path; `flate2` comes in transitively via zip's `deflate`
+feature). Byte identity with `archiver` is explicitly **not** a contract (SPEC A §1.4
+closing note); the member layout is. The integrator should keep this dependency line.
+
+Note: the foundation also carried explicit `flate2`/`tar` deps anticipating tarball
+*extraction*, but toolkit vendoring copies `.tgz` files verbatim and never extracts, so
+those two deps were unused in non-test code and have been removed; `flate2` remains
+present only transitively under `zip`.
 
 ---
 
@@ -477,7 +487,9 @@ template now ships a type-correct AudioClip right-click action that renames the 
 action was triggered on, using the documented `getObjectFromHandle(args[0] as Handle,
 AudioClip)` pattern (SPEC A §4 surface). The shape is unchanged (one command + one
 AudioClip context-menu action, pure-JS only); only the body is now valid against the
-real SDK so a freshly-scaffolded project passes `validate`/`pack` out of the box.
+real SDK. Combined with the starter `CHANGELOG.md` the scaffold now writes (see D-26),
+a freshly-scaffolded project passes `validate`/`pack` out of the box (once its
+dependencies are installed — see D-41 for the auto-build/install behavior).
 
 ### D-38. `doctor` resolves the User Library non-interactively (DESIGN §2 / SPEC C §3.4)
 
@@ -511,3 +523,31 @@ tell them apart and labels both "(from ABLETON_USER_LIBRARY)" in its echo. The
 documented approximation in the frozen foundation resolver (a cosmetic echo only — the
 flag still wins); distinguishing the two would require a foundation `Ctx` change and is
 left for a later coordinated bump.
+
+### D-42. `validate --strict` flag (additive to the DESIGN §2 synopsis)
+
+DESIGN §2's validate synopsis is `rackabel validate [--json]`. The implementation adds
+a `--strict` flag (frozen in `cli.rs` `ValidateArgs`) that promotes every warning-tier
+rule (e.g. stable-identifier drift) to a failure (exit 4). This is an **additive**
+escape hatch for CI ("treat compatibility risks as blocking") that does not change the
+default behavior — without `--strict`, warnings remain non-fatal exactly as the spec
+describes. Recorded here so the extra flag is a documented decision, not a silent
+surface addition; it is the same `--strict` `explain RK4005` already references.
+
+### D-41. `new`'s auto-build friendly-skips when dependencies aren't installed (DESIGN §0 / §6.2)
+
+DESIGN §0/§6.2's happy path shows `✓ built your extension (84ms)` immediately after
+`new`. But `new` vendors the SDK/CLI tarballs and pins `esbuild` in `package.json`
+*without* running an install (it has no managed/bundled package manager in 0.2; the
+install is `npm install`, which the musician runs once). So on a brand-new project there
+is no `node_modules`, and an immediate build would fail with the scary RK1301 "couldn't
+find esbuild" frame on EVERY first run — exactly DESIGN §1's "first thing they see is
+error:" trap. `maybe_auto_build` therefore checks for `node_modules` first: when a usable
+node exists but deps are not installed, it **friendly-skips** with the exact next steps
+(`cd <dir> && npm install`, then `rackabel build`/`dev`) instead of dead-ending on a red
+error — the same shape as the existing no-node skip. The auto-build still runs (and shows
+the `✓ built` line) once deps are installed (e.g. on a second `new` into a populated dir,
+or after the user installs). A `new` that vendors and *also* runs the install is a later
+improvement once rackabel drives a package manager end-to-end (cf. D-19); the contract
+("a successful `new` never shows a red `error:`") is honored now. No spec behavior is
+dropped — the build still happens, just after the one documented `npm install` step.
