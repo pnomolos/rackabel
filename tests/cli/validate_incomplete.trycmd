@@ -1,0 +1,21 @@
+An extension with no author (and no git user.name to infer one — git config is
+suppressed inline) fails the manifest-completeness rule. validate exits 4
+(validation) with the three-part frame carrying RK4001, so `rackabel explain RK4001`
+is discoverable from the error itself.
+
+```
+$ ABLETON_APP=/nonexistent-ableton-live.app RACKABEL_HOME=rk-home GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null rackabel validate
+? 4
+using inferred author = (unknown) (set [extension].author or run `git config user.name`)
+[✗] manifest incomplete — missing author (set [extension].author in rackabel.toml)
+[!] minimumApiVersion 1.0.0 — skipped (no Ableton Live found to compare against)
+[!] version 1.2.0 — skipped (no previous pack recorded; this is the first release)
+[✓] CHANGELOG.md has an entry for 1.2.0
+[!] native dependencies — none declared
+[!] stable-identifier drift — not checkable yet (command ids are registered in code, not the manifest; see `rackabel explain RK4005`)
+1 failure
+error: validation failed — 1 failure [RK4001]
+  help: fix the rule(s) marked ✗ above, then rerun `rackabel validate`
+(run `rackabel explain RK4001` for details)
+
+```

@@ -5,6 +5,7 @@
 
 mod build;
 mod common;
+mod validate;
 
 use assert_cmd::prelude::*;
 use common::*;

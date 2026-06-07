@@ -113,6 +113,55 @@ can be added without changing the build-hash contract.
 
 ---
 
+## 0.2 validate + explain
+
+### D-11. Host apiVersion is a known constant, not read from the host binary (DESIGN §2 / SPEC A §2)
+
+DESIGN §2's validate rule is `minimumApiVersion ≤ detected host apiVersion`. The
+host's *actual* supported apiVersion is only knowable at runtime
+(`ActivationContext.hostApiVersion`); it cannot be read from the binary
+`ExtensionHostNodeModule.node` on disk. The only static source is the SDK bundle's
+`EXTENSIONS_API_VERSIONS` constant (`["1.0.0"]`, SPEC A §2). So `validate` treats a
+*detected Live install* (one whose host module exists) as evidence the host supports
+that known apiVersion (`1.0.0`) and compares against it; when **no Live is found** it
+**skips-with-note** rather than failing or guessing (exactly as DESIGN §2 directs:
+"via foundation services; skip-with-note when no Live found"). Reading the precise
+host apiVersion at runtime is a 0.3 dev-host concern; reading the SDK bundle's
+constant from a vendored toolkit is the build/new owner's job (they hold a resolved
+`Toolkit`). No spec behavior is dropped — only the *source* of the host version is the
+known constant, not the live host, until 0.3.
+
+### D-12. Stable-identifier drift is not yet machine-checkable (DESIGN §2 / SPEC A §2)
+
+DESIGN §2 wants validate to flag a command id that was present in the last packed
+manifest and has since been removed/renamed. SPEC A §2 establishes that commands and
+context-menu actions are **registered in code at runtime** and are **not declared in
+the manifest** — the on-disk manifest has only name/author/entry/version/
+minimumApiVersion. There is therefore no on-disk command list to diff, and the last
+packed *manifest* is not retained (only the last packed *version* is in
+`.rackabel/state.toml`). validate implements what is checkable and reports the
+identifier-drift rule honestly as a **skip** ("not checkable yet") rather than a false
+pass; `rackabel explain RK4005` documents the compatibility contract so authors keep
+old ids working. Full command-id drift detection waits on a mechanism to capture the
+registered ids (e.g. a build-time scan or a packed sidecar), a 0.3+ item.
+
+### D-13. validate's native-`.node` check is a lightweight presence test, not the full graph walk (DESIGN §2 / SPEC B §3 / SPEC C §3.8)
+
+DESIGN §2 includes "native `.node` files present and matching the target". The full
+pnpm-aware dependency-graph walk + `.node` assertion (`services::native_dep::audit`,
+SPEC C §3.8) is owned by `deploy` and is still a foundation stub that returns
+"not implemented". To avoid `validate` depending on an unimplemented service, the
+native-`.node` rule performs a self-contained, **read-only** check: for each declared
+`[extension.build].native_deps`, it confirms `node_modules/<dep>` exists and contains
+at least one `*.node` (not descending into nested `node_modules`, mirroring the
+ground-truth `hasNativeBinary`). It does **not** walk the transitive optionalDeps
+graph or verify the prebuild matches the target arch — those are deploy/pack
+responsibilities. When deploy's `audit` lands, validate should call it for the full
+check; until then this presence test catches the common "install scripts didn't run,
+so there's no compiled binary" footgun (SPEC B §3) without false-passing.
+
+---
+
 ## Deferred (to be recorded by the owning command branch when it lands)
 
 These are flagged in the specs as likely deviations but belong to a command body the

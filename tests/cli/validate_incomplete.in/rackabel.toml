@@ -1,0 +1,8 @@
+# An incomplete extension fixture: name/version/entry/minimum_api_version are set
+# (so only the author is inferred), but no author is given and the test suppresses
+# git config — so author resolves empty and the manifest-completeness rule fails.
+[extension]
+name = "Clip Renamer"
+version = "1.2.0"
+entry = "src/extension.ts"
+minimum_api_version = "1.0.0"
