@@ -6,15 +6,17 @@ A CLI for building Ableton Live Extensions and Max for Live devices.
 
 ## Status
 
-**0.4 — Extensibility.** rackabel is now extensible end to end: third-party
-`rackabel-<foo>` subcommands (Git/cargo-style dispatch, built-ins always win), a pinned
-`plugin install`/`list`/`enable`/`disable`/`search` surface backed by `plugins.lock`, and
-Git-hosted **templates** — `new --template` to scaffold and `new --update` to 3-way-merge
-later. This sits on top of 0.3's managed dev host (`rackabel dev`: supervised Extension Host
-daemon, persistent registry, watch + hot-reload, per-extension logs, no-Live CI) and the 0.2
-build/deploy/pack/validate parity, richer `new`, and extended `doctor`. The Max for Live
-`[device]` path is preserved (its `.amxd` assembly is still a later milestone); lifecycle
-hooks land in 0.5.
+**0.5 — Lifecycle hooks + ship-quality.** Plugins (and your own repo) can now hook
+rackabel's lifecycle: `post_build`, `pre_deploy` (the one veto), `on_reload`,
+`doctor_check`, and `new_template`, each with a documented stdin/stdout contract,
+wall-clock timeouts, and an explicit consent model (see *Hooks* below). `validate` gained
+stable-identifier drift detection against the last-packed manifest, `--json` is uniform
+across the documented command list, and exit-code precedence is locked in by a test
+matrix. This sits on 0.4's extensibility (PATH subcommands, pinned plugins, templates),
+0.3's managed dev host (`rackabel dev`: supervised Extension Host daemon, registry,
+watch + hot-reload, per-extension logs, no-Live CI), and 0.2's build/deploy/pack/validate
+parity. The Max for Live `[device]` path is preserved (its `.amxd` assembly is still a
+later milestone).
 
 ## Commands
 
@@ -163,8 +165,9 @@ file fails with exit 4 before it ever runs. Pins protect against tampering and s
 updates — rackabel never auto-updates a plugin.
 
 A plugin runs with the §5.2 environment contract: `RACKABEL` (always the current binary),
-`RACKABEL_HOME`, and — inside a project — `RACKABEL_PROJECT_ROOT`. Vars are *unset* (not
-empty) when they don't apply, and the contract is additive over your existing environment.
+`RACKABEL_VERSION`, `RACKABEL_PLUGIN_API`, `RACKABEL_REGISTRY`, and — inside a project —
+`RACKABEL_MANIFEST` and `RACKABEL_PROJECT_DIR`. Vars are *unset* (not empty) when they
+don't apply, and the contract is additive-only: a var that exists today exists forever.
 
 ## Templates
 
@@ -188,6 +191,42 @@ repo, commit, and answers are recorded in the project's `.rackabel-template` so 
 re-runs the same template. A remote template is confirmation-gated exactly like a remote
 plugin install (`--yes` / `--no-input` semantics). See
 [`docs/TEMPLATES.md`](docs/TEMPLATES.md) for the template-author reference.
+
+## Hooks
+
+Plugins — and your own project — can hook rackabel's lifecycle. Five named hooks exist:
+
+| Hook | Fires | stdin payload | Exit-code meaning |
+|---|---|---|---|
+| `post_build`   | after every successful build (incl. each dev-loop save) | project + bundle + build hash | nonzero = logged + skipped, never aborts |
+| `pre_deploy`   | before every deploy copy | project + bundle + target | **nonzero ABORTS the deploy** (the one veto) |
+| `on_reload`    | after a dev-host reload | project + name + reload ms + ok | nonzero = logged + skipped |
+| `doctor_check` | during `rackabel doctor` | project (absent outside one) | one JSON stdout line wins; else 0 = pass, nonzero = fail row |
+| `new_template` | before the `new` wizard's template prompt | `{kind}` only | prints a template path/ref to add as a wizard choice |
+
+Every hook gets the §5.2 env contract plus `RACKABEL_HOOK_API`, one JSON object on stdin
+(then EOF), and runs under a wall-clock timeout (default 30s, per-hook override via
+`[hooks.timeouts]`; SIGTERM, then SIGKILL) — a hanging hook can never freeze a save or
+block a deploy indefinitely.
+
+**Consent is explicit.** An installed plugin's hooks are disabled by default;
+`rackabel plugin enable <name>` shows exactly which hooks will run at which lifecycle
+points (including "on every save") and asks for confirmation. Changing a plugin's pinned
+code disables its hooks again — new code never runs under consent given for old code.
+
+**Your own repo needs no ceremony.** A project's `rackabel.toml` may declare local hooks
+directly — no manifest, no enable step (it's your code):
+
+```toml
+[hooks]
+post_build = ".rackabel/hooks/post-build"
+
+[hooks.timeouts]
+post_build = 120000   # ms
+```
+
+`rackabel plugin migrate` is the forward-compatibility surface for future `hook_api`
+bumps (today: `hook_api = 1`, nothing to migrate).
 
 ## Project layout
 

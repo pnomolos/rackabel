@@ -1,6 +1,6 @@
 [package]
 name = "rackabel"
-version = "0.2.0"
+version = "0.5.0"
 edition = "2024"
 description = "A CLI for building Max for Live devices and Ableton Live extensions"
 repository = "https://github.com/pnomolos/rackabel"
