@@ -382,6 +382,13 @@ impl DaemonState {
             .iter()
             .map(|(e, r)| (e.name.clone(), r.clone()))
             .collect();
+        // Build+deploy the kept `source = dist` entries into the User Library BEFORE the
+        // host is pointed at the deployed bundle (DESIGN §3.3 build→deploy→reload). The
+        // host reads `manifest.json` + `dist/extension.js` from the deployed copy and
+        // aborts the whole process if a path is missing, so an initial deploy is the
+        // trap-closing invariant on `dev start` / bare `dev`'s first sync, not just on
+        // subsequent file-change reloads.
+        self.deploy_kept(&kept);
         let inspect = self.inspect.lock().unwrap().clone();
         let cfg = resolve::host_config(&self.target, &kept, inspect, &self.ctx);
         match Host::launch(cfg, self.sink.clone()) {
@@ -391,6 +398,42 @@ impl DaemonState {
                 // auto-respawn a never-started host (only a crashed one).
             }
         }
+    }
+
+    /// Build + deploy each kept `source = dist` registry entry into the User Library so the
+    /// host's deployed-bundle path exists before launch/reload. Best-effort and quiet (a
+    /// project-rooted `json` ctx keeps the reused 0.2 build/deploy services from emitting
+    /// human frames into the captured daemon stdout); a per-entry failure is logged to the
+    /// sink and skipped rather than aborting the whole launch — the host will then report
+    /// that one extension as missing but its siblings still load.
+    fn deploy_kept(&self, kept: &[RegistryEntry]) {
+        for e in kept {
+            if e.source != super::Source::Dist {
+                continue; // Deployed-source entries are already in the User Library.
+            }
+            if let Err(err) = self.deploy_one(&e.path) {
+                self.sink.host_stdout(&format!(
+                    "rackabel: failed to deploy {} before host launch: {}",
+                    e.name, err.problem
+                ));
+            }
+        }
+    }
+
+    /// Build (if stale) + deploy a single project root, reusing the 0.2 services verbatim.
+    fn deploy_one(&self, root: &Path) -> CmdResult<()> {
+        let project = crate::manifest::Project::discover(root)?;
+        let mut quiet = self.ctx.clone();
+        quiet.cwd = project.root.clone();
+        quiet.json = true;
+        let args = crate::cli::DeployArgs {
+            release: false,
+            undo: false,
+            fix: false,
+            dry_run: false,
+        };
+        // `deploy` builds-if-stale then copies the deploy set into the User Library.
+        crate::commands::deploy::run(&args, &quiet)
     }
 
     /// The enabled registry entries scoped by the working set (post-disambiguation
@@ -459,6 +502,13 @@ impl DaemonState {
                 host_state: self.current_host_state(),
             };
         }
+
+        // Ensure every kept `source = dist` entry is built + deployed before the host is
+        // (re)pointed at its deployed bundle (DESIGN §3.3). The watch chain deploys before
+        // it calls `reload`, so this is a cheap no-op there (build-if-stale skips a fresh
+        // bundle); for `set_working_set`'s implicit reload, the manual `dev reload` hotkey,
+        // and a crash-recovery respawn it is the step that puts the bundle on disk.
+        self.deploy_kept(&kept);
 
         let inspect = self.inspect.lock().unwrap().clone();
         let cfg = resolve::host_config(&self.target, &kept, inspect, &self.ctx);
@@ -808,6 +858,14 @@ fn serve_until_shutdown(listener: UnixListener, state: Arc<DaemonState>) {
     while !state.shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, _)) => {
+                // macOS (BSD) `accept(2)` inherits the listener's O_NONBLOCK onto the
+                // accepted socket; the listener is non-blocking (so the accept loop can
+                // poll the shutdown flag), which would make the per-connection blocking
+                // `read_line` return `WouldBlock` after the first request and tear the
+                // connection down — breaking the watch UI's persistent multi-request
+                // connection. Force the accepted stream back to blocking. (Linux does not
+                // inherit the flag, so this is a no-op there.)
+                let _ = stream.set_nonblocking(false);
                 let st = Arc::clone(&state);
                 std::thread::spawn(move || handle_conn(stream, st));
             }

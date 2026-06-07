@@ -282,12 +282,12 @@ impl WatchPlan {
             for entry in &self.entries {
                 // The extension's own source (under root/, excluding its libs which live
                 // under node_modules and are filtered out above).
-                if path.starts_with(&entry.root) {
+                if path_under(path, &entry.root) {
                     cs.affected.insert(entry.name.clone(), entry.root.clone());
                 }
                 // A dependent library's source.
                 for lib in &entry.libs {
-                    let in_lib = path.starts_with(&lib.src) || path.starts_with(&lib.root);
+                    let in_lib = path_under(path, &lib.src) || path_under(path, &lib.root);
                     if in_lib {
                         cs.affected.insert(entry.name.clone(), entry.root.clone());
                         lib_set.insert(lib.root.clone(), lib.clone());
@@ -297,6 +297,22 @@ impl WatchPlan {
         }
         cs.libs = lib_set.into_values().collect();
         cs
+    }
+}
+
+/// Whether `path` is `base` or lives beneath it, robust to symlinked path prefixes (e.g.
+/// macOS `/tmp` → `/private/tmp`, firmlinked `/Users`). The OS file-watcher (FSEvents on
+/// macOS) reports the canonical real path of a changed file, while the registry stores the
+/// path the user typed — a plain `starts_with` then silently never matches and no reload
+/// ever fires. Canonicalize both sides before comparing; fall back to the lexical
+/// `starts_with` if either side can't be canonicalized (e.g. a deleted file).
+fn path_under(path: &Path, base: &Path) -> bool {
+    if path.starts_with(base) {
+        return true;
+    }
+    match (std::fs::canonicalize(path), std::fs::canonicalize(base)) {
+        (Ok(p), Ok(b)) => p.starts_with(&b),
+        _ => false,
     }
 }
 
@@ -1066,6 +1082,35 @@ mod tests {
         );
         assert_eq!(cs.libs.len(), 1, "the edited library is queued for rebuild");
         assert_eq!(cs.libs[0].name, "@arclight/core");
+    }
+
+    #[test]
+    fn classify_matches_through_a_symlinked_path_prefix() {
+        // REGRESSION: the OS file-watcher (FSEvents) reports the *canonical* real path of
+        // a changed file, while the registry stores the path the user typed. When the
+        // project lives under a symlinked prefix (the everyday macOS case: `/tmp` →
+        // `/private/tmp`, firmlinked `/Users`), a lexical `starts_with` never matches and
+        // NO reload ever fires. `path_under` must canonicalize both sides. Here we register
+        // the extension under a symlinked alias of its real dir and feed classify the real
+        // (canonical) source path — it must still mark the extension affected.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real");
+        std::fs::create_dir_all(real.join("clip-renamer/src")).unwrap();
+        std::fs::write(real.join("clip-renamer/src/extension.ts"), "// x").unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // Registry path goes through the symlink; the changed path is the canonical real one.
+        let ext_via_link = link.join("clip-renamer");
+        let ctx = ctx_for(tmp.path());
+        let p = plan(&[entry("clip-renamer", &ext_via_link)], &ctx).unwrap();
+        let changed = std::fs::canonicalize(real.join("clip-renamer/src/extension.ts")).unwrap();
+        let cs = p.classify(&[changed]);
+        assert_eq!(
+            cs.affected_names(),
+            vec!["clip-renamer".to_string()],
+            "a canonical change path must match a symlinked registry root"
+        );
     }
 
     #[test]

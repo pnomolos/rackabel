@@ -316,6 +316,56 @@ fn socket_round_trip_ping_reload_and_bad_version() {
     force_stop(home.path(), work.path(), live.app_path());
 }
 
+/// REGRESSION: several requests on ONE persistent connection (what the bare-`dev`/watch
+/// UI does — it keeps a single `Client` open for SetWorkingSet, Status, and every Reload).
+/// macOS `accept(2)` inherits the listener's non-blocking flag onto the accepted socket;
+/// if the daemon doesn't clear it, the per-connection blocking read returns `WouldBlock`
+/// after the first request and the connection is torn down — so the watch loop's *second*
+/// call (the reload after an edit) fails with `RK0309 lost the connection`. The earlier
+/// round-trip test masked this by opening a fresh connection per request. This test issues
+/// three requests on the SAME stream and asserts all three get a reply.
+#[test]
+fn multiple_requests_on_one_connection() {
+    let home = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
+
+    dev_cmd(home.path(), work.path(), live.app_path())
+        .args(["dev", "start"])
+        .assert()
+        .success();
+    wait_for_daemon(home.path()).expect("daemon up");
+    let sock = find_socket(home.path()).expect("socket exists");
+
+    let stream = UnixStream::connect(&sock).expect("connect socket");
+    let mut writer = stream.try_clone().unwrap();
+    let mut reader = BufReader::new(stream);
+    let mut call = |req: &str| -> String {
+        writer.write_all(req.as_bytes()).unwrap();
+        writer.write_all(b"\n").unwrap();
+        writer.flush().unwrap();
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).expect("read a reply");
+        assert!(
+            n > 0,
+            "daemon closed the connection mid-session (req: {req})"
+        );
+        line
+    };
+
+    let r1 = call(r#"{"v":1,"type":"ping"}"#);
+    assert!(r1.contains("\"type\":\"pong\""), "1st: {r1}");
+    // The SECOND request on the SAME connection is the one the non-blocking-accept bug
+    // dropped.
+    let r2 = call(r#"{"v":1,"type":"status"}"#);
+    assert!(r2.contains("\"type\":\"status\""), "2nd: {r2}");
+    let r3 = call(r#"{"v":1,"type":"ping"}"#);
+    assert!(r3.contains("\"type\":\"pong\""), "3rd: {r3}");
+
+    force_stop(home.path(), work.path(), live.app_path());
+}
+
 #[test]
 fn crash_looping_is_reported_by_status() {
     let home = TempDir::new().unwrap();

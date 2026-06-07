@@ -877,3 +877,55 @@ they are isolated from each other regardless of case order; (3) wipes those (git
 relative state dirs at harness start so a run never inherits residue. No transcript
 *content* contract changed; only the state-root plumbing. The `RACKABEL_HOME=rk-home`
 validate transcripts now also genuinely isolate (previously the suite value silently won).
+
+---
+
+## 0.3 live verification
+
+### D-69. `dev start` / `dev` must build+deploy the enabled set BEFORE launching the host (DESIGN §3.3, SPEC H §1)
+
+Live verification surfaced a launch-time gap: the daemon's `launch_initial` (and the
+fresh-launch + reload paths in `do_reload`) built the host's `initialize()` array from
+`resolve::host_config`, which points each extension at its DEPLOYED bundle
+(`<UserLibrary>/Extensions/<slug>`), but nothing actually deployed there first. The watch
+loop only deploys on a *subsequent* file change; the very first `dev start` / bare `dev`
+sync pointed the host at a non-existent `manifest.json`, so the real Extension Host threw
+`Failed to read manifest.json … not found` as an uncaughtException and exited code 1 —
+crash-looping until the supervisor gave up. DESIGN §3.3's atomic build→deploy→reload is not
+only a per-edit invariant; the initial host launch needs the deployed bundle on disk too.
+Fix: `DaemonState::deploy_kept` builds-if-stale + deploys each kept `source = dist` entry
+(reusing the 0.2 `deploy` service verbatim, quiet/`json` ctx) before the host config is
+built, called from both `launch_initial` and `do_reload`. It is a cheap no-op when the
+watch chain already deployed (build-if-stale skips a fresh bundle) and is the step that puts
+the bundle on disk for `dev start`, `set_working_set`'s implicit reload, and manual
+`dev reload`.
+
+### D-70. macOS `accept(2)` inherits the listener's non-blocking flag — clear it per connection (SPEC D §2)
+
+The daemon's socket server makes the LISTENER non-blocking so the accept loop can poll the
+shutdown flag (SPEC D §2 design). On macOS/BSD, `accept(2)` inherits `O_NONBLOCK` from the
+listening socket onto each accepted connection (Linux does not). The per-connection handler
+does a *blocking* `read_line` loop to serve many requests on one persistent connection —
+which is exactly what the bare-`dev`/watch UI relies on (one `Client` open for
+`SetWorkingSet`, `Status`, and every `Reload`). With the inherited non-blocking flag, the
+second `read_line` returned `WouldBlock`, the handler treated it as EOF and tore the
+connection down, so the watch loop's reload-after-edit failed with `RK0309 lost the
+connection` and the headline live-reload silently loaded the previous bundle. Fix:
+`stream.set_nonblocking(false)` on every accepted connection in `serve_until_shutdown`
+(no-op on Linux). Regression test:
+`tests/integration/dev_daemon.rs::multiple_requests_on_one_connection` (three requests on
+one stream; fails with BrokenPipe without the fix). The prior socket round-trip test masked
+this by opening a fresh connection per request.
+
+### D-71. Watch path matching must canonicalize symlinked prefixes (DESIGN §3.3 / §4.4)
+
+The OS file-watcher (FSEvents on macOS) reports the CANONICAL real path of a changed file,
+while the registry stores the path the user typed. When a project lives under a symlinked
+prefix — the everyday macOS case `/tmp` → `/private/tmp`, and firmlinked `/Users` — the
+watch classifier's `path.starts_with(&entry.root)` never matched the incoming event, so NO
+reload ever fired on save. Fix: a `path_under(path, base)` helper that falls back to
+comparing `canonicalize(path)` against `canonicalize(base)` when the lexical `starts_with`
+misses; used for both the extension-root and workspace-lib matches in `ChangeSet::classify`.
+Regression test:
+`watch::tests::classify_matches_through_a_symlinked_path_prefix` (registers via a symlink
+alias, feeds classify the canonical path).
