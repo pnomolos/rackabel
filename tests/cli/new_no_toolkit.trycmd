@@ -1,0 +1,28 @@
+The §6.2 "SDK download isn't there yet" path — the most likely first run. It must
+not dead-end: numbered steps, the beta URL, the exact re-run command, the pick-file
+fallback, and the "answers remembered" line. Exit 3 (environment not ready).
+
+```
+$ rackabel new clip-renamer --no-input --sdk-dir ./no-toolkit-here
+? 3
+  Looking for the Ableton Extensions toolkit…
+error: Couldn't find the Ableton Extensions toolkit download. [RK0201]
+  help: It's a separate file from Ableton, only available if you've joined the
+        Extensions beta. Access is granted by Ableton and may not be instant —
+        once you have the toolkit file, come back and run the command below.
+        Here's how to get it:
+          1. Join / open the beta at:  https://www.ableton.com/extensions-beta
+             (if that page has moved, search Ableton's site for "Extensions beta".
+              if you've just requested access, you may need to wait for approval.)
+          2. Download the toolkit file it gives you (it ends in .tgz).
+          3. Put it (or its folder) anywhere easy, e.g. your Downloads folder.
+             The .tgz, or an unzipped folder, either works — I'll find it.
+        Then run this once, pointing at where you saved it:
+           rackabel new clip-renamer --sdk-dir ./no-toolkit-here
+        (or just run `rackabel new` again and pick the file when asked.)
+        Already downloaded it but still seeing this? Run `rackabel new` again
+        and choose "find the toolkit file myself" to point me straight at it.
+        Your answers above are remembered — nothing was lost.
+(run `rackabel explain RK0201` for details)
+
+```

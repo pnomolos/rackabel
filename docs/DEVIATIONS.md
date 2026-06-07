@@ -113,6 +113,103 @@ can be added without changing the build-hash contract.
 
 ---
 
+## 0.2 new (`rackabel new`)
+
+### D-11. `--author` / `--license` are wizard prompts, not CLI flags (DESIGN §2 / SPEC C frozen CLI)
+
+The task brief lists `--author` and `--license` among `new`'s flags, but the frozen
+`cli.rs` (`NewArgs`) ships neither (only `--kind`, `--template`, `--minimal`, `--yes`,
+`--no-input`, `--sdk-dir`, `--git`/`--no-git`, `--device-kind`, `--update`). Rather than
+mutate the frozen CLI surface, `new` collects author and license **through the wizard**
+(with Enter-to-accept defaults: author from `git config user.name`, license `MIT`).
+Under `--no-input` neither is required: author follows UX rule 1 (infer-and-echo, never
+hard-fail) and is left empty when unknown — `validate` surfaces a missing author later
+(`RK4001`) — and license defaults to `MIT`. If first-class `--author`/`--license` flags
+are wanted, the integrator should add them to the frozen `NewArgs`; this is noted so the
+omission is a recorded decision, not a silent drop. (No spec behavior is lost — both
+values are still captured.)
+
+### D-12. The default template is rackabel's fork; the official `create-extension` reuse path is wired but dormant (DESIGN §4.7)
+
+DESIGN §4.7 says `new` should *reuse* the official `create-extension` scaffolder when
+present (shell out, then post-process) and use rackabel's fork only when absent. The
+gated `create-extension` tarball is **not** vendored into rackabel and is **not**
+present in tests (it is beta-gated, like the SDK/CLI). So in 0.2 the **forked** native
+scaffold (`scaffold::render`) is the path actually exercised; the post-process side of
+§4.7 is implemented (`scaffold::postprocess` derives `rackabel.toml` from the emitted
+`manifest.json`/`package.json`, drops `build.ts`, rewrites scripts to call `rackabel`,
+keeps the vendored tarballs, adds `.rackabel/` to `.gitignore`) and unit-tested, so the
+reuse path is honored the moment the official scaffolder is available — it is not
+painted into a corner — but it is dormant until then. The fork produces the **same
+shape** the official scaffolder + post-process would, so callers are agnostic to which
+ran. The default template is pure-JS only (one command + one AudioClip right-click
+action that renames selected clips), so it never pulls a native or UI/vite dep.
+
+### D-13. Generated `package.json` scripts drive `rackabel`, not `tsx build.ts` / `extensions-cli` (DESIGN §4.7 / SPEC A §3.5)
+
+The official template's `package.json` scripts are `tsc --noEmit && tsx build.ts …`
+plus `extensions-cli run/package`, and it emits a `build.ts`. Per §4.7 ("replace
+`build.ts` with the rackabel pipeline") the rackabel-form project omits `build.ts` and
+maps the scripts to `rackabel build` / `rackabel deploy` / `rackabel pack` /
+`rackabel dev`. The SDK/CLI are still vendored and wired as `file:` deps (SPEC A §3.4),
+and `esbuild` is still pinned at `0.28.0` so a plain `npm install` resolves the same
+toolchain rackabel drives. `manifest.json` is **not** hand-written into the project —
+`rackabel build` generates it from `rackabel.toml` (§4.5), and it is gitignored.
+
+### D-14. Toolkit "vendoring into the project" = copy SDK+CLI into `<project>/vendor`; the gated tarballs are never committed to rackabel (SPEC A / DESIGN §4)
+
+SPEC A says "vendor the tarballs into the project wired via `file:` deps." Because the
+SDK/CLI tarballs are beta-gated (not redistributable, not on public npm), rackabel does
+**not** commit them into its own repo. Instead `new` discovers the user's downloaded
+toolkit (`toolkit::discover`) and copies the discovered SDK+CLI into the new project's
+`vendor/` (`toolkit::vendor_into`), then writes `file:./vendor/<basename>` deps that
+match the vendored files. Tests fabricate tiny stand-in `.tgz` fixtures
+(`tests/fixtures/toolkit/`) — they never depend on the real gated tarballs.
+
+### D-15. Wizard answers are remembered under `$RACKABEL_HOME`, keyed by project name (DESIGN §6.2)
+
+The §6.2 SDK-not-found transcript promises "Your answers above are remembered." rackabel
+persists the wizard answers to `$RACKABEL_HOME/new-answers/<sanitized-name>.toml` on the
+SDK-not-found stop, seeds the wizard's Enter-to-accept defaults from that file on the
+re-run for the same name, and clears it after a successful scaffold. This is the
+mechanism behind the promise; it is best-effort (a write/read failure is swallowed so a
+failure to remember never becomes a second error). The `--update` 3-way-merge answers
+lockfile (`.rackabel-template`, §5.5) is a *separate*, 0.4 concern and is not
+implemented here.
+
+### D-16. Remote `--template` refs (`gh:`/`@scope`) are a framed "coming in 0.4" usage error (DESIGN §5.5)
+
+Remote template fetch + render is the 0.4 templates milestone. In 0.2, `new` accepts the
+`--template` flag but, for a remote ref, returns a three-part usage error (exit 2)
+pointing at 0.4 rather than silently falling back to the default. A **local** `--template
+<path>` is accepted without error but is not yet applied (the built-in default template
+is used); applying a local template directory also lands with tier-1 templates in 0.4.
+This honors the brief ("accept the flag but print a framed not-yet-supported error for
+remote refs") without painting the 0.4 work into a corner.
+
+### D-17. SDK-not-found / no-node trycmd vs. integration split (SPEC C §5)
+
+The §6.2 SDK-not-found and `--no-input` cases are deterministic regardless of the host
+machine (they fail before any Live/node detection), so they are **trycmd** transcript
+acceptance tests (`tests/cli/new_no_toolkit.trycmd`, `new_no_input.trycmd`). The happy
+scaffold and the no-node friendly-skip depend on Live/PATH-node *absence*, which the
+shared trycmd harness cannot isolate on a developer's real machine (Live and a PATH node
+may be present). Those two — plus answer-persistence, git-init/`--no-git`/`--minimal`,
+and the device dispatch — are **assert_cmd integration tests** (`tests/integration/new.rs`)
+that pin `ABLETON_APP` to a no-host fake `.app` and strip `PATH` to a node-free dir, so
+Live/node detection is deterministic. Same coverage, deterministic across machines.
+
+### D-18. The Extensions-beta URL is centralized in one module with an env override (DESIGN §6.2)
+
+§6.2 requires the placeholder beta URL to come from "remote/updatable config — not a
+hard-coded constant" scattered through the code. There is no remote-config fetch in 0.2
+(that lands with the dev-host/registry milestone), so the URL lives in exactly **one**
+module (`commands/new/config.rs`) and is read everywhere from there, with a
+`RACKABEL_EXTENSIONS_BETA_URL` env override so a moved page can be corrected without a
+release in the interim. When remote config arrives, only this module changes.
+
+---
+
 ## Deferred (to be recorded by the owning command branch when it lands)
 
 These are flagged in the specs as likely deviations but belong to a command body the
