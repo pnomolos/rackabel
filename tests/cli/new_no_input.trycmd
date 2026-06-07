@@ -1,0 +1,12 @@
+Under --no-input, any branch that would prompt becomes a deterministic error rather
+than a silent default-accept (the GLOBAL --no-input rule). A name has no inferable
+default, so omitting it is a usage error (exit 2), naming the positional argument.
+
+```
+$ rackabel new --no-input
+? 2
+error: a project name is required [RK4001]
+  help: pass it as the first argument, e.g. `rackabel new <name>` (running with --no-input, so I won't prompt for it)
+(run `rackabel explain RK4001` for details)
+
+```

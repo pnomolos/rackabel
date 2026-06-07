@@ -7,6 +7,7 @@ mod build;
 mod common;
 mod deploy;
 mod doctor;
+mod new;
 mod pack;
 mod validate;
 
