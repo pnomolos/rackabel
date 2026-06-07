@@ -5,6 +5,7 @@
 
 mod build;
 mod common;
+mod deploy;
 
 use assert_cmd::prelude::*;
 use common::*;
@@ -115,30 +116,36 @@ fn both_kinds_is_ambiguous() {
         .stderr(predicate::str::contains("RK0002"));
 }
 
-/// The fake Live fixture is detected via `--live` (the testability seam): deploy of
-/// an extension reaches the deploy stub, proving discovery + dispatch wire up.
+/// The fake Live fixture is detected via `--live` (the testability seam): a
+/// `deploy --dry-run` of an extension resolves the target and prints the plan,
+/// proving discovery + dispatch + User-Library resolution wire up end-to-end without
+/// building or copying anything.
 #[test]
-fn extension_deploy_reaches_stub_with_fake_env() {
+fn extension_deploy_dry_run_with_fake_env() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
+    let proj = work.path().join("clip-renamer");
+    std::fs::create_dir_all(&proj).unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::Universal, FakeLayout::Helpers);
     let ul = FakeUserLibrary::new();
 
     std::fs::write(
-        work.path().join("rackabel.toml"),
-        "[extension]\nname = \"x\"\n",
+        proj.join("rackabel.toml"),
+        "[extension]\nname = \"Clip Renamer\"\nauthor = \"Jane\"\nversion = \"0.1.0\"\nentry = \"src/extension.ts\"\nminimum_api_version = \"1.0.0\"\n",
     )
     .unwrap();
 
-    rackabel_cmd(home.path(), work.path())
+    rackabel_cmd(home.path(), &proj)
         .arg("deploy")
+        .arg("--dry-run")
         .arg("--live")
         .arg(live.app_path())
         .arg("--user-library")
         .arg(ul.path())
         .assert()
-        .failure()
-        // deploy (extension) stub: build/runtime class.
-        .code(1)
-        .stderr(predicate::str::contains("isn't implemented yet"));
+        .success()
+        .stdout(predicate::str::contains("planned deploy"))
+        // slug = the project directory basename, not the manifest name.
+        .stdout(predicate::str::contains("slug: clip-renamer"))
+        .stdout(predicate::str::contains("Extensions/clip-renamer"));
 }
