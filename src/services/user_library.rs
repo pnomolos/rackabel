@@ -7,17 +7,23 @@
 //! 4. newest-mtime `~/Music/Ableton*/User Library` that contains `Extensions/`,
 //! 5. platform default.
 //!
-//! Multiple candidates at step 4 → numbered pick-list (never free-text); under
-//! `--no-input` pick the newest and echo which (`RK0301` only if `--no-input`
-//! cannot pick — it always can here, by the newest rule, matching `dev-launch.sh`'s
-//! "no TTY → first" behavior). `RK0302` if nothing is resolvable. The `ctx`
-//! overrides (flag/env) are the testability seam.
+//! Multiple candidates at step 4 (DESIGN §7 interactivity split):
+//! - interactive TTY → numbered pick-list (never free-text);
+//! - non-TTY without `--no-input` → *inferred* non-interactive: fall back to the
+//!   documented resolution order (newest mtime) and echo which;
+//! - explicit `--no-input` → deterministic `RK0301` environment error listing the
+//!   candidates ("do not prompt, and do not invent an answer" — newest-mtime is
+//!   machine-state-dependent, which is exactly what a CI run must not depend on).
+//!
+//! `RK0302` if nothing is resolvable. The `ctx` overrides (flag/env) are the
+//! testability seam. Diagnostics that must never prompt *or* fail on ambiguity
+//! (doctor) use [`resolve_newest`].
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::context::Ctx;
-use crate::error::{CmdResult, ErrorCode, RkError};
+use crate::error::{CmdResult, ErrorCode, ExitClass, RkError};
 use crate::manifest::Project;
 use crate::ui;
 
@@ -50,8 +56,41 @@ pub struct UserLibrary {
     pub source: ULSource,
 }
 
+/// How an ambiguous step-4 scan (several `~/Music/Ableton*/User Library`) resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ambiguity {
+    /// Interactive TTY: numbered pick-list.
+    Prompt,
+    /// Non-interactive (non-TTY, or a diagnostic): newest mtime wins, echoed.
+    Newest,
+    /// Explicit `--no-input`: deterministic error listing the candidates.
+    Error,
+}
+
 /// Resolve the User Library, echoing the resolved value + how it was chosen.
 pub fn resolve(project: Option<&Project>, ctx: &Ctx) -> CmdResult<UserLibrary> {
+    let ambiguity = if ctx.no_input {
+        Ambiguity::Error
+    } else if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        Ambiguity::Newest
+    } else {
+        Ambiguity::Prompt
+    };
+    resolve_with(project, ctx, ambiguity)
+}
+
+/// Non-prompting resolution for diagnostics (doctor): same order, but ambiguity
+/// always resolves newest-wins + echo — a checklist must report a concrete library,
+/// never prompt and never fail on ambiguity.
+pub fn resolve_newest(project: Option<&Project>, ctx: &Ctx) -> CmdResult<UserLibrary> {
+    resolve_with(project, ctx, Ambiguity::Newest)
+}
+
+fn resolve_with(
+    project: Option<&Project>,
+    ctx: &Ctx,
+    ambiguity: Ambiguity,
+) -> CmdResult<UserLibrary> {
     // 1. Flag / env (both surface as ctx.ableton_user_library; the flag took
     //    precedence at Ctx construction). We can't tell flag from env apart here, so
     //    treat the unified override as Env-or-Flag; report it as Flag when it came
@@ -92,9 +131,32 @@ pub fn resolve(project: Option<&Project>, ctx: &Ctx) -> CmdResult<UserLibrary> {
             echo(&ul, ctx);
             return Ok(ul);
         }
-        many => {
-            if ctx.no_input {
-                // Newest wins, echo which (dev-launch.sh "no TTY → first").
+        many => match ambiguity {
+            Ambiguity::Error => {
+                // §7: --no-input means "do not prompt, and do not invent an answer".
+                // Newest-mtime across several libraries is machine-state-dependent —
+                // exactly what a deterministic CI run must not silently depend on.
+                let list = many
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("  {}. {}", i + 1, c.path.display()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(RkError::new(
+                    ErrorCode::UserLibraryAmbiguous,
+                    ExitClass::Environment,
+                    format!(
+                        "found {} User Libraries, and --no-input forbids picking one",
+                        many.len()
+                    ),
+                    format!(
+                        "choose explicitly with --user-library or ABLETON_USER_LIBRARY:\n{list}"
+                    ),
+                ));
+            }
+            Ambiguity::Newest => {
+                // Inferred non-interactive: the documented resolution order (newest
+                // Extensions mtime) decides, loudly.
                 let ul = UserLibrary {
                     path: many[0].path.clone(),
                     source: ULSource::NewestMtime,
@@ -107,15 +169,18 @@ pub fn resolve(project: Option<&Project>, ctx: &Ctx) -> CmdResult<UserLibrary> {
                 );
                 return Ok(ul);
             }
-            let labels: Vec<String> = many.iter().map(|c| c.path.display().to_string()).collect();
-            let idx = ui::prompt::select("User Library", &labels, ctx)?;
-            let ul = UserLibrary {
-                path: many[idx].path.clone(),
-                source: ULSource::NewestMtime,
-            };
-            echo(&ul, ctx);
-            return Ok(ul);
-        }
+            Ambiguity::Prompt => {
+                let labels: Vec<String> =
+                    many.iter().map(|c| c.path.display().to_string()).collect();
+                let idx = ui::prompt::select("User Library", &labels, ctx)?;
+                let ul = UserLibrary {
+                    path: many[idx].path.clone(),
+                    source: ULSource::NewestMtime,
+                };
+                echo(&ul, ctx);
+                return Ok(ul);
+            }
+        },
     }
 
     // 4. Platform default — only if it exists; otherwise RK0302.
@@ -270,17 +335,43 @@ mod tests {
     }
 
     #[test]
-    fn no_input_multiple_picks_newest() {
+    fn no_input_multiple_is_deterministic_error() {
+        // §7: --no-input must not invent an answer — ambiguity is an RK0301
+        // environment error that lists the candidates.
         let tmp = tempdir().unwrap();
         let home = tmp.path();
-        let a = home.join("Music/Ableton/User Library/Extensions");
-        let b = home.join("Music/Ableton Beta/User Library/Extensions");
-        fs::create_dir_all(&a).unwrap();
-        fs::create_dir_all(&b).unwrap();
-        // Touch b later so it's newest.
-        let ctx = ctx_with_home(home);
+        fs::create_dir_all(home.join("Music/Ableton/User Library/Extensions")).unwrap();
+        fs::create_dir_all(home.join("Music/Ableton Beta/User Library/Extensions")).unwrap();
+        let ctx = ctx_with_home(home); // ctx_with_home sets no_input = true
+        let err = resolve(None, &ctx).unwrap_err();
+        assert_eq!(err.code, ErrorCode::UserLibraryAmbiguous);
+        assert_eq!(err.class, ExitClass::Environment);
+        assert!(err.help.contains("Ableton"), "help lists the candidates");
+    }
+
+    #[test]
+    fn non_tty_multiple_picks_newest() {
+        // Without --no-input, a non-TTY run (cargo test always is) infers
+        // non-interactive and falls back to the documented newest-mtime order.
+        let tmp = tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(home.join("Music/Ableton/User Library/Extensions")).unwrap();
+        fs::create_dir_all(home.join("Music/Ableton Beta/User Library/Extensions")).unwrap();
+        let mut ctx = ctx_with_home(home);
+        ctx.no_input = false;
         let ul = resolve(None, &ctx).unwrap();
-        // One of them; under no_input we don't error.
+        assert_eq!(ul.source, ULSource::NewestMtime);
+    }
+
+    #[test]
+    fn resolve_newest_never_errors_on_ambiguity() {
+        // doctor's path: ambiguity resolves newest-wins even under --no-input.
+        let tmp = tempdir().unwrap();
+        let home = tmp.path();
+        fs::create_dir_all(home.join("Music/Ableton/User Library/Extensions")).unwrap();
+        fs::create_dir_all(home.join("Music/Ableton Beta/User Library/Extensions")).unwrap();
+        let ctx = ctx_with_home(home);
+        let ul = resolve_newest(None, &ctx).unwrap();
         assert_eq!(ul.source, ULSource::NewestMtime);
     }
 }

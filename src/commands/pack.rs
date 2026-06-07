@@ -19,13 +19,10 @@
 //!        one archive per declared target, `<slug>-v<version>-<os>-<arch>.ablx`.
 //!   5. Print copy-pasteable **install instructions** on success.
 //!
-//! ## Why pack does not call `commands::validate::run`
-//! `commands/validate.rs` is owned by another agent and is still a foundation stub; a
-//! shared, callable validation service does not exist in 0.2's frozen surface. To
-//! keep pack's "never ship a failing artifact" gate real *now* without reaching into
-//! another owner's file, pack runs the validation subset it needs inline. When the
-//! validate-owner exposes a callable gate, pack should delegate to it — recorded in
-//! docs/DEVIATIONS.md.
+//! ## Validation gate
+//! pack delegates to `commands::validate::run` (the full ship-readiness checklist)
+//! before producing any artifact — "never ship a failing artifact". Any validation
+//! failure aborts the pack with exit 4.
 
 use std::path::PathBuf;
 
