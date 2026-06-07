@@ -170,7 +170,7 @@ behavior on a user's machine).
 
 ## 0.2 validate + explain
 
-### D-11. Host apiVersion is a known constant, not read from the host binary (DESIGN §2 / SPEC A §2)
+### D-16. Host apiVersion is a known constant, not read from the host binary (DESIGN §2 / SPEC A §2)
 
 DESIGN §2's validate rule is `minimumApiVersion ≤ detected host apiVersion`. The
 host's *actual* supported apiVersion is only knowable at runtime
@@ -186,7 +186,7 @@ constant from a vendored toolkit is the build/new owner's job (they hold a resol
 `Toolkit`). No spec behavior is dropped — only the *source* of the host version is the
 known constant, not the live host, until 0.3.
 
-### D-12. Stable-identifier drift is not yet machine-checkable (DESIGN §2 / SPEC A §2)
+### D-17. Stable-identifier drift is not yet machine-checkable (DESIGN §2 / SPEC A §2)
 
 DESIGN §2 wants validate to flag a command id that was present in the last packed
 manifest and has since been removed/renamed. SPEC A §2 establishes that commands and
@@ -200,7 +200,7 @@ pass; `rackabel explain RK4005` documents the compatibility contract so authors 
 old ids working. Full command-id drift detection waits on a mechanism to capture the
 registered ids (e.g. a build-time scan or a packed sidecar), a 0.3+ item.
 
-### D-13. validate's native-`.node` check is a lightweight presence test, not the full graph walk (DESIGN §2 / SPEC B §3 / SPEC C §3.8)
+### D-18. validate's native-`.node` check is a lightweight presence test, not the full graph walk (DESIGN §2 / SPEC B §3 / SPEC C §3.8)
 
 DESIGN §2 includes "native `.node` files present and matching the target". The full
 pnpm-aware dependency-graph walk + `.node` assertion (`services::native_dep::audit`,
@@ -219,7 +219,7 @@ so there's no compiled binary" footgun (SPEC B §3) without false-passing.
 
 ## 0.2 deploy
 
-### D-11. `native_dep::fix` IS implemented (no slip) — but depends on pnpm on PATH (DESIGN §3.7 / SPEC C §3.8)
+### D-19. `native_dep::fix` IS implemented (no slip) — but depends on pnpm on PATH (DESIGN §3.7 / SPEC C §3.8)
 
 The foundation shipped `native_dep::fix` as an `RK0304` stub. The deploy branch
 replaced it with the real behavior: locate `pnpm` on PATH, run `pnpm approve-builds`
@@ -233,7 +233,7 @@ PATH (the official scaffold sets projects up with pnpm). If pnpm is absent, `--f
 fails with a plain-English environment error pointing the developer at installing pnpm
 — still no raw module/tool-not-found. A managed/bundled pnpm is a later milestone.
 
-### D-12. `extra_dist_files` ARE copied on deploy (unifying deploy with pack) (SPEC B §3)
+### D-20. `extra_dist_files` ARE copied on deploy (unifying deploy with pack) (SPEC B §3)
 
 Resolved the deferred item: the Arclight `deploy-extension.js` helper copies only
 `manifest.json` + `dist/extension.js` (lidal overrides this for `editor-client.js`);
@@ -242,7 +242,7 @@ matching pack and lidal's intent so the deployed and packed dist trees are ident
 declared extra dist file that is missing on disk is a warn-and-skip (parity with
 `pack-extension.js`), not a hard failure.
 
-### D-13. build-if-stale uses an mtime check, not the recorded build hash (DESIGN §2 deploy)
+### D-21. build-if-stale uses an mtime check, not the recorded build hash (DESIGN §2 deploy)
 
 DESIGN §2 says deploy runs "build (if stale)". The build owner records a content hash
 in `.rackabel/state.toml`, but that hash function is private to `services::esbuild`.
@@ -255,7 +255,7 @@ deploy-before-reload trap, DESIGN §3). Note this is a *stale* check that prefer
 rebuilding; it does not detect a manual edit of the bundle itself (the SDK never wants
 that anyway, since the bundle is generated).
 
-### D-14. `--undo` safety contract: refuse a folder without a `manifest.json` (DESIGN §2 deploy)
+### D-22. `--undo` safety contract: refuse a folder without a `manifest.json` (DESIGN §2 deploy)
 
 `--undo` removes `<UserLibrary>/Extensions/<slug>`. To avoid ever `rm -rf`-ing an
 unrelated user folder that happens to share the slug, deploy refuses (framed error,
@@ -265,7 +265,7 @@ written member of a rackabel deploy. A not-deployed target is a clean no-op succ
 discoverable cleanup path"; this adds the safety gate the spec implies but does not
 spell out.
 
-### D-15. `deploy --release` calls `validate::run` directly (DESIGN §2 deploy)
+### D-23. `deploy --release` calls `validate::run` directly (DESIGN §2 deploy)
 
 `deploy --release` runs `validate` first and fails the deploy on any validation error,
 per DESIGN §2. It does this by calling `crate::commands::validate::run(...)` so it
@@ -281,7 +281,7 @@ deploy tests for exactly this reason.)
 
 ## 0.2 pack
 
-### D-11. `pack` emits `.ablx` only — the Arclight `.zip` layout is dropped (DESIGN §4.7 / SPEC B §4)
+### D-24. `pack` emits `.ablx` only — the Arclight `.zip` layout is dropped (DESIGN §4.7 / SPEC B §4)
 
 The Arclight `pack-extension.js` produces `releases/<slug>-v<version>[-os-arch].zip`
 (a User-Library-shaped zip), while the official `extensions-cli package` produces
@@ -305,7 +305,7 @@ The native `.ablx` member layout is `manifest.json` + the manifest `entry` +
 the target suffix) — the official packager bundles **no** node_modules (SPEC C §0), so
 this is the only path that yields a working native bundle.
 
-### D-12. The lidal `lidal.openEditor` sentinel is dropped (SPEC B §4)
+### D-25. The lidal `lidal.openEditor` sentinel is dropped (SPEC B §4)
 
 `pack-extension.js`'s pre-flight has a lidal-specific guard: if `slug === "lidal"`, the
 bundle text must contain `lidal.openEditor` or it errors (a wrong-bundle hack). This is
@@ -314,7 +314,7 @@ correctness gates that *do* generalize (bundle exists, `node --check` parses it 
 already enforced by the shared `build` step that `pack` runs first) are kept; the 10KB
 floor stays a build-time warning (see D-8).
 
-### D-13. `pack` runs an inline ship-validation subset, not `commands::validate::run` (DESIGN §2 pack)
+### D-26. `pack` runs an inline ship-validation subset, not `commands::validate::run` (DESIGN §2 pack)
 
 DESIGN §2 requires `pack` to auto-run `validate` and fail with exit 4 before producing
 a distributable. In 0.2 there is no shared, callable validation **service** in the
@@ -328,7 +328,7 @@ delegate to it for the full checklist (version-bump, identifier drift, native `.
 presence). No spec behavior is dropped — only a narrower subset runs until the shared
 gate exists.
 
-### D-14. `zip` crate added for the own packer (SPEC C §2)
+### D-27. `zip` crate added for the own packer (SPEC C §2)
 
 SPEC C §2 anticipates a Rust zip crate ("e.g. `zip`") for the own packer. The
 foundation `Cargo.toml` did not yet include one, so the pack branch adds
@@ -341,7 +341,7 @@ the member layout is. The integrator should keep this dependency line.
 
 ## 0.2 new (`rackabel new`)
 
-### D-11. `--author` / `--license` are wizard prompts, not CLI flags (DESIGN §2 / SPEC C frozen CLI)
+### D-28. `--author` / `--license` are wizard prompts, not CLI flags (DESIGN §2 / SPEC C frozen CLI)
 
 The task brief lists `--author` and `--license` among `new`'s flags, but the frozen
 `cli.rs` (`NewArgs`) ships neither (only `--kind`, `--template`, `--minimal`, `--yes`,
@@ -355,7 +355,7 @@ are wanted, the integrator should add them to the frozen `NewArgs`; this is note
 omission is a recorded decision, not a silent drop. (No spec behavior is lost — both
 values are still captured.)
 
-### D-12. The default template is rackabel's fork; the official `create-extension` reuse path is wired but dormant (DESIGN §4.7)
+### D-29. The default template is rackabel's fork; the official `create-extension` reuse path is wired but dormant (DESIGN §4.7)
 
 DESIGN §4.7 says `new` should *reuse* the official `create-extension` scaffolder when
 present (shell out, then post-process) and use rackabel's fork only when absent. The
@@ -371,7 +371,7 @@ shape** the official scaffolder + post-process would, so callers are agnostic to
 ran. The default template is pure-JS only (one command + one AudioClip right-click
 action that renames selected clips), so it never pulls a native or UI/vite dep.
 
-### D-13. Generated `package.json` scripts drive `rackabel`, not `tsx build.ts` / `extensions-cli` (DESIGN §4.7 / SPEC A §3.5)
+### D-30. Generated `package.json` scripts drive `rackabel`, not `tsx build.ts` / `extensions-cli` (DESIGN §4.7 / SPEC A §3.5)
 
 The official template's `package.json` scripts are `tsc --noEmit && tsx build.ts …`
 plus `extensions-cli run/package`, and it emits a `build.ts`. Per §4.7 ("replace
@@ -382,7 +382,7 @@ and `esbuild` is still pinned at `0.28.0` so a plain `npm install` resolves the 
 toolchain rackabel drives. `manifest.json` is **not** hand-written into the project —
 `rackabel build` generates it from `rackabel.toml` (§4.5), and it is gitignored.
 
-### D-14. Toolkit "vendoring into the project" = copy SDK+CLI into `<project>/vendor`; the gated tarballs are never committed to rackabel (SPEC A / DESIGN §4)
+### D-31. Toolkit "vendoring into the project" = copy SDK+CLI into `<project>/vendor`; the gated tarballs are never committed to rackabel (SPEC A / DESIGN §4)
 
 SPEC A says "vendor the tarballs into the project wired via `file:` deps." Because the
 SDK/CLI tarballs are beta-gated (not redistributable, not on public npm), rackabel does
@@ -392,7 +392,7 @@ toolkit (`toolkit::discover`) and copies the discovered SDK+CLI into the new pro
 match the vendored files. Tests fabricate tiny stand-in `.tgz` fixtures
 (`tests/fixtures/toolkit/`) — they never depend on the real gated tarballs.
 
-### D-15. Wizard answers are remembered under `$RACKABEL_HOME`, keyed by project name (DESIGN §6.2)
+### D-32. Wizard answers are remembered under `$RACKABEL_HOME`, keyed by project name (DESIGN §6.2)
 
 The §6.2 SDK-not-found transcript promises "Your answers above are remembered." rackabel
 persists the wizard answers to `$RACKABEL_HOME/new-answers/<sanitized-name>.toml` on the
@@ -403,7 +403,7 @@ failure to remember never becomes a second error). The `--update` 3-way-merge an
 lockfile (`.rackabel-template`, §5.5) is a *separate*, 0.4 concern and is not
 implemented here.
 
-### D-16. Remote `--template` refs (`gh:`/`@scope`) are a framed "coming in 0.4" usage error (DESIGN §5.5)
+### D-33. Remote `--template` refs (`gh:`/`@scope`) are a framed "coming in 0.4" usage error (DESIGN §5.5)
 
 Remote template fetch + render is the 0.4 templates milestone. In 0.2, `new` accepts the
 `--template` flag but, for a remote ref, returns a three-part usage error (exit 2)
@@ -413,7 +413,7 @@ is used); applying a local template directory also lands with tier-1 templates i
 This honors the brief ("accept the flag but print a framed not-yet-supported error for
 remote refs") without painting the 0.4 work into a corner.
 
-### D-17. SDK-not-found / no-node trycmd vs. integration split (SPEC C §5)
+### D-34. SDK-not-found / no-node trycmd vs. integration split (SPEC C §5)
 
 The §6.2 SDK-not-found and `--no-input` cases are deterministic regardless of the host
 machine (they fail before any Live/node detection), so they are **trycmd** transcript
@@ -425,7 +425,7 @@ and the device dispatch — are **assert_cmd integration tests** (`tests/integra
 that pin `ABLETON_APP` to a no-host fake `.app` and strip `PATH` to a node-free dir, so
 Live/node detection is deterministic. Same coverage, deterministic across machines.
 
-### D-18. The Extensions-beta URL is centralized in one module with an env override (DESIGN §6.2)
+### D-35. The Extensions-beta URL is centralized in one module with an env override (DESIGN §6.2)
 
 §6.2 requires the placeholder beta URL to come from "remote/updatable config — not a
 hard-coded constant" scattered through the code. There is no remote-config fetch in 0.2
@@ -449,3 +449,65 @@ foundation only stubs; the owning branch records the final decision here.
   RESOLVED by the doctor branch — see the doctor section above.
 - **`extra_dist_files` copied on deploy** (SPEC B §3). Resolved by the deploy branch —
   see the deploy section above.
+
+---
+
+## 0.2 integration (merge + smoke test)
+
+These were resolved while merging the five command branches and smoke-testing the
+combined 0.2 surface end to end against the real SDK tarballs.
+
+### D-36. `--yes` accepts defaults non-interactively, like `--no-input` for present defaults (DESIGN §1 / D-3)
+
+`new --yes` means "accept defaults." The frozen `ui::prompt::text` only auto-accepts a
+default under `ctx.no_input`, so before this fix `new --yes` on a non-TTY still tried to
+prompt for author/license and failed. `new`'s wizard now resolves defaults directly when
+`--yes` (or `--no-input`) is set — author from `git config user.name` (else empty,
+surfaced later by `validate` per UX rule 1), license `MIT` — and only reaches an
+interactive prompt when neither flag is set. A missing project *name* under either flag
+remains a deterministic usage error (no inferable default). This is the accept-defaults
+half of D-3; no `ui::prompt` signature changed.
+
+### D-37. The default `new` template uses verified SDK API only (DESIGN §2 / SPEC A §3.5)
+
+The default template originally registered a "rename selected clips" command using
+`song.view.selectedClips`, which is **not** part of the SDK's `Song` type — `rackabel
+build` (no typecheck) succeeded but `pack`/`--typecheck` failed `tsc --noEmit`. The
+template now ships a type-correct AudioClip right-click action that renames the clip the
+action was triggered on, using the documented `getObjectFromHandle(args[0] as Handle,
+AudioClip)` pattern (SPEC A §4 surface). The shape is unchanged (one command + one
+AudioClip context-menu action, pure-JS only); only the body is now valid against the
+real SDK so a freshly-scaffolded project passes `validate`/`pack` out of the box.
+
+### D-38. `doctor` resolves the User Library non-interactively (DESIGN §2 / SPEC C §3.4)
+
+`user_library::resolve` prompts (numbered pick-list) when several
+`~/Music/Ableton*/User Library` folders exist and `--no-input` is not set. `doctor` is a
+diagnostic and must never prompt, so it forces the deterministic newest-wins resolution
+(the same path `--no-input` takes) for its User-Library row. Without this, a machine with
+both an "Ableton" and an "Ableton Alpha" library made `doctor` report a spurious
+"couldn't find your User Library" on a non-TTY. No resolver signature changed; doctor
+passes a `no_input`-forced clone of its quiet context.
+
+### D-39. `doctor::preflight` is available but not wired into build/deploy/pack `run()` (SPEC C §3.7)
+
+The doctor branch exposed `doctor::preflight(Preflight::{Build,Deploy,Pack}, …)` and
+suggested each command call it at the top of `run()`. The integrator did **not** wire it
+in: build/deploy/pack already perform their own, more granular environment resolution
+(via `services::esbuild`/`user_library`/`live`) and already return correctly-framed
+RK03xx environment errors with the right remedies and exit code 3 (covered by their
+tests). Forcing a `preflight` that requires node would also break the intentionally
+hermetic `build`/`pack` dry-run paths (which never touch node). `preflight` remains
+available and unit-tested for the 0.3 dev host; wiring it into the command bodies is a
+follow-up that should reconcile it with the dry-run paths first. No spec behavior is
+lost — the same remedies are produced today by the commands' own checks.
+
+### D-40. User Library source label is approximate for `--user-library` (known foundation limitation)
+
+`--user-library` (flag) and `$ABLETON_USER_LIBRARY` (env) are merged into a single
+`ctx.ableton_user_library` at `Ctx` construction (flag wins), so the resolver cannot
+tell them apart and labels both "(from ABLETON_USER_LIBRARY)" in its echo. The
+`ULSource::Flag` variant is therefore not reachable post-merge. This is a pre-existing,
+documented approximation in the frozen foundation resolver (a cosmetic echo only — the
+flag still wins); distinguishing the two would require a foundation `Ctx` change and is
+left for a later coordinated bump.
