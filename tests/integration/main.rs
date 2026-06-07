@@ -12,6 +12,11 @@ mod dev;
 // The hermetic daemon-lifecycle tests (DAEMON-CORE): real binary + FakeHost seam.
 #[cfg(unix)]
 mod dev_daemon;
+// `dev reload` exit-code contract against a fake daemon (REGISTRY).
+#[cfg(unix)]
+mod dev_reload;
+// Registry CRUD verbs end to end (REGISTRY).
+mod dev_registry;
 mod doctor;
 mod new;
 mod pack;

@@ -1,0 +1,4 @@
+[extension]
+name = "my-ext"
+author = "tester"
+version = "0.1.0"

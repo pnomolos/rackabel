@@ -695,3 +695,41 @@ FakeHost's crash mode now prints the connected marker + liveness first by defaul
 (`RK_FAKEHOST_CRASH_PRECONNECT=1` restores the pre-connect crash for the launch-fails
 case), so the crash-respawn/crash-loop tests exercise the real supervisor path. The
 existing "crash mode exits non-zero" fixture assertion is unaffected.
+
+### D-56. `dev reload --strict` skip is exit 1, not RK4006's validation class 4 (DESIGN §7 / SPEC D §3)
+
+SPEC D §3 lists `RK4006 SkippedIncompatible` as a *validation* code (exit class 4), but
+DESIGN §7 and the milestone task both require `dev reload --strict` to make any
+pre-filtered skip **fatal exit 1** ("`--strict`, which makes any skip fatal exit 1
+(RK4006/treated as a strict failure)"). The `reload` verb resolves this by keeping the
+`RK4006` code (so `rackabel explain RK4006` still describes the skip) while constructing
+the error with an explicit `ExitClass::BuildRuntime` via `RkError::new`, so `--strict`
+exits 1 as documented. Without `--strict` a skip is reported on stderr / in `--json` and
+the exit stays 0. The foundation's `ErrorCode::class()` default for `RK4006` (validation)
+is unchanged; only this one `--strict`-failure site overrides the class.
+
+### D-57. `dev reload` locates the daemon by scanning the daemon dir, not via Live resolution (DESIGN §3.2/§3.6 / SPEC D §2)
+
+The reload verb must give a clean `exit 3 RK0309` when no daemon is up — even on a machine
+with no Live install (the §6.2/§7 scriptable-CI contract, exercised hermetically by
+trycmd + the fake-daemon integration tests). Routing through full Live resolution first
+(`resolve::resolve` → `live::primary`) would instead surface an unrelated `RK0303
+NoLiveInstall` on such a machine. So `connect_daemon` (a small shared helper in
+`commands/dev/mod.rs`) finds the daemon by scanning `~/.rackabel/daemon/*.sock` and
+connecting to the first socket that answers, falling back to `RK0309` when none do. With
+one daemon per Live install this is unambiguous in the common case; multi-Live
+disambiguation (keying off the resolved socket hash) is deferred to when a second daemon
+can actually coexist.
+
+### D-58. `register --name` collision is a usage error, not an interactive auto-rename (DESIGN §3.2)
+
+DESIGN §3.2 describes auto-disambiguation on collisions. For an *explicit* `--name` that
+collides with an existing entry, rackabel treats the invocation as unsatisfiable-as-written
+and returns `RK0312 NameCollision` (usage, exit 2) naming a free alternative, rather than
+silently renaming what the user explicitly asked for or prompting (which would leak an
+RK4001 "no interactive terminal" in non-TTY/CI contexts and make the transcript
+non-deterministic). The *auto* name path (no `--name`) still auto-disambiguates the dir
+basename against existing names and reserved verbs (parent-prefixed, echoed). A `--name`
+equal to a reserved dev verb is still *forced* with a warning (stored verbatim, reachable
+only via `--only`/`--`), via the new `Registry::add_named` (extends, does not reshape, the
+foundation model).
