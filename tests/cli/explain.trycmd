@@ -1,3 +1,6 @@
+`rackabel explain <code>` prints cargo-style long-form help for an error code: what
+happened, why, and the concrete next step. Codes are case-insensitive.
+
 ```
 $ rackabel explain RK0001
 RK0001 — No rackabel.toml found
@@ -6,7 +9,17 @@ rackabel looks for a rackabel.toml in the current directory and its
 parents. None was found. Run `rackabel new` to scaffold a project, or
 cd into an existing project directory.
 
+Every rackabel command (build, deploy, pack, validate) runs against a
+project rooted at a rackabel.toml. It is the single source of truth for
+the extension's name, version, entry point, and toolchain.
+
+To fix:
+- `cd` into the project folder (the one holding rackabel.toml), or
+- run `rackabel new <name>` to scaffold a new project here.
+
 ```
+
+A lower-case code resolves the same explanation.
 
 ```
 $ rackabel explain rk0303
@@ -15,5 +28,47 @@ RK0303 — No Ableton Live install found
 No Ableton Live install was found (or all installs are below 12.4.5).
 Install Live Suite 12.4.5+ and enable the Extensions beta, then rerun
 `rackabel doctor`.
+
+Live Extensions require Live Suite 12.4.5 or newer with the Extensions
+beta enabled. rackabel scans /Applications for `Ableton Live*.app`; you
+can also point it at a specific app with `--live <path>` or the
+ABLETON_APP environment variable.
+
+To fix:
+1. Install Ableton Live Suite 12.4.5 or newer.
+2. Enable the Extensions beta (Live → Settings → … → Beta).
+3. Run `rackabel doctor` to confirm it is detected.
+
+```
+
+A validation code explains the matching `rackabel validate` rule.
+
+```
+$ rackabel explain RK4003
+RK4003 — Version not bumped vs the last packed version
+
+The current version is not newer than the last version you packed.
+
+rackabel records the last packed version in .rackabel/state.toml. If you
+pack again with the same (or an older) version, existing users would not
+receive the update, and two different builds would share one version
+number — a support nightmare.
+
+To fix:
+- bump [extension].version (e.g. 1.2.0 → 1.2.1 for a fix, → 1.3.0 for
+a feature), then rerun. `rackabel validate` reports the last packed
+version it is comparing against.
+
+```
+
+An unknown code is a usage error (exit 2) and lists every valid code, so it is never
+a dead end.
+
+```
+$ rackabel explain RK9999
+? 2
+error: no such error code `RK9999` [RK0001]
+  help: valid codes: RK0001, RK0002, RK0003, RK0201, RK0202, RK0301, RK0302, RK0303, RK0304, RK0305, RK0306, RK1301, RK1302, RK1303, RK1304, RK1305, RK4001, RK4002, RK4003, RK4004, RK4005
+(run `rackabel explain RK0001` for details)
 
 ```

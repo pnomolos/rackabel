@@ -1,0 +1,9 @@
+# A complete, ship-ready extension fixture: every required field is set, so the
+# only rules that can fail (manifest completeness, changelog) pass. With no Live and
+# no prior pack, the host-apiVersion and version-bump rules skip-with-note.
+[extension]
+name = "Clip Renamer"
+author = "Jane Doe"
+version = "1.2.0"
+entry = "src/extension.ts"
+minimum_api_version = "1.0.0"

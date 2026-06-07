@@ -1,0 +1,8 @@
+# A fixture whose manifest is complete but has no CHANGELOG.md, so the changelog
+# rule fails on its own (the precise single-failure path).
+[extension]
+name = "Clip Renamer"
+author = "Jane Doe"
+version = "1.2.0"
+entry = "src/extension.ts"
+minimum_api_version = "1.0.0"

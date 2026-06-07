@@ -1,0 +1,18 @@
+A complete manifest with no CHANGELOG.md fails the changelog rule and exits 4. Env
+is pinned inline (no Live → apiVersion rule skips; isolated state).
+
+```
+$ ABLETON_APP=/nonexistent-ableton-live.app RACKABEL_HOME=rk-home rackabel validate
+? 4
+[✓] manifest complete
+[!] minimumApiVersion 1.0.0 — skipped (no Ableton Live found to compare against)
+[!] version 1.2.0 — skipped (no previous pack recorded; this is the first release)
+[✗] CHANGELOG.md not found — add one with an entry for 1.2.0 (e.g. `## 1.2.0`)
+[!] native dependencies — none declared
+[!] stable-identifier drift — not checkable yet (command ids are registered in code, not the manifest; see `rackabel explain RK4005`)
+1 failure
+error: validation failed — 1 failure [RK4001]
+  help: fix the rule(s) marked ✗ above, then rerun `rackabel validate`
+(run `rackabel explain RK4001` for details)
+
+```

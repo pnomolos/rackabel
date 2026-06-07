@@ -6,6 +6,7 @@
 mod build;
 mod common;
 mod doctor;
+mod validate;
 
 use assert_cmd::prelude::*;
 use common::*;
