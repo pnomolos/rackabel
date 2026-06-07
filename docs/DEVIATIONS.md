@@ -1114,3 +1114,33 @@ inaccurate). `new --update` short-circuits before kind resolution, reads the fro
 `.rackabel-template` lockfile, and returns "nothing to update" (`RK0402`) when absent or the
 not-implemented merge frame when present. The TEMPLATES agent fills the fetch/render/3-way
 merge; the foundation freezes the source classification + the lockfile models.
+
+### D-87. The both-locations warning is one-time per name, persisted under RACKABEL_HOME (DESIGN §5.1)
+
+DESIGN §5.1 says rackabel emits a **one-time** warning when an external `rackabel-<foo>` is
+resolvable from both `~/.rackabel/plugins/bin` and `$PATH`. The foundation surfaced the
+warning but fired it on every invocation. This milestone makes it genuinely one-time: the
+first both-locations hit for a given name prints the warning and records the name in
+`~/.rackabel/plugins/warned-both-locations` (one name per line); later runs of that name stay
+quiet. The state file is **advisory** — a missing/unreadable/unwritable file just means the
+warning fires again, so it never turns a plugin invocation into an error. Under `--json`/the
+`quiet` dev-watch seam the warning is suppressed AND not recorded, so a later interactive run
+still gets the nudge. `plugin which <name>` remains the always-shown authoritative surface.
+
+### D-88. The both-locations warning prints to STDERR, not stdout (DESIGN §5.1)
+
+The §5.1 warning (and the shared `ui::frame::ewarn` helper added for it) writes to **stderr**,
+not stdout. The bare `rackabel <foo>` dispatch and the `plugin run` escape hatch both forward
+the plugin's own stdout to the user (a plugin may emit machine output a caller pipes); a
+warning on stdout would corrupt that stream. stderr keeps the plugin's stdout pristine while
+still surfacing the collision. (`ui::frame::emit`, the existing status helper, is stdout-only;
+`ewarn` is a small additive sibling — flagged for the integrator as a shared `ui` change.)
+
+### D-89. Unknown-token frame carries a did-you-mean help LINE, never an auto-correct (DESIGN §5.1)
+
+An unknown top-level token with no matching `rackabel-<foo>` returns `RK0401` as before, but
+its `help:` block now leads with a did-you-mean line listing the closest candidates (built-ins
++ installed plugins within Levenshtein distance ≤ min(len/2, 2)), e.g. `did you mean:
+\`build\`?`. It is purely a help line LISTING candidates — rackabel never silently runs a
+different command than the user typed (no auto-correct), honoring the §5.7 never-silent posture.
+A genuinely novel token (e.g. `frobnicate`) gets no suggestion and the original frame verbatim.

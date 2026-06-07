@@ -49,6 +49,32 @@ error: unknown command `frobnicate` (no built-in and no plugin by that name) [RK
 
 ```
 
+A near-miss of a built-in gets a did-you-mean help LINE listing the closest candidate(s)
+— never an auto-correct: rackabel never silently runs a command the user didn't type
+(§5.1). It is still RK0401 (exit 3), just with a suggestion.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel biuld
+? 3
+error: unknown command `biuld` (no built-in and no plugin by that name) [RK0401]
+  help: did you mean: `build`?
+        run `rackabel --help` for built-ins, `rackabel plugin list` for installed plugins, or `rackabel plugin install OWNER/REPO` to add one
+(run `rackabel explain RK0401` for details)
+
+```
+
+`plugin run <unknown>` (the escape hatch) on a name that resolves to nothing is the same
+RK0401 environment error.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel plugin run nope
+? 3
+error: no plugin named `nope` is installed or on PATH [RK0401]
+  help: run `rackabel plugin list`, or `rackabel plugin install OWNER/REPO`
+(run `rackabel explain RK0401` for details)
+
+```
+
 `plugin install` classifies the source (the frozen, tested part) and then frames the
 not-yet-implemented boundary — the install/pin/lock body lands with the 0.4
 plugin-management work.
