@@ -12,6 +12,9 @@ mod dev;
 // The hermetic daemon-lifecycle tests (DAEMON-CORE): real binary + FakeHost seam.
 #[cfg(unix)]
 mod dev_daemon;
+// The `dev logs` sink/fallback tests (LOGS agent).
+#[cfg(unix)]
+mod dev_logs;
 mod doctor;
 mod new;
 mod pack;
