@@ -696,6 +696,7 @@ FakeHost's crash mode now prints the connected marker + liveness first by defaul
 case), so the crash-respawn/crash-loop tests exercise the real supervisor path. The
 existing "crash mode exits non-zero" fixture assertion is unaffected.
 
+<<<<<<< HEAD
 ### D-56. `dev reload --strict` skip is exit 1, not RK4006's validation class 4 (DESIGN §7 / SPEC D §3)
 
 SPEC D §3 lists `RK4006 SkippedIncompatible` as a *validation* code (exit class 4), but
@@ -773,3 +774,34 @@ to the test runner (NOT the bare loop's `RK0307`). Both tests were updated to as
 real contract (`RK0001` present, `RK0307` absent). The name-vs-verb routing guarantee is
 preserved; only the stub's placeholder code/exit changed. `tests/cli/explain.trycmd`'s
 valid-codes list gained `RK1308`.
+
+### D-62. `dev logs` non-`--follow` reads persisted session files directly, not the daemon (DESIGN §3.4, SPEC D §2)
+
+SPEC D §2 lists a `Logs{follow:false}` request whose response replays history then
+`LogEnd`. The LOGS command instead serves a non-`--follow` read **entirely from the
+persisted per-extension session files** (`~/.rackabel/logs/<name>/<session>.log`), only
+using the daemon socket for `--follow` live streaming. Rationale: (a) DESIGN §3.4 mandates
+that a read-only `dev logs` "must work with a dead daemon" — the file path is the single
+source of truth that satisfies that unconditionally; (b) the files are complete and
+already merged across session rotation, so there is no behavioral gap when the daemon is
+up vs down; (c) it avoids depending on the daemon-core `stream_logs` non-follow handler
+(another agent's file) replaying the in-memory ring. The sink still keeps an in-memory
+history ring + exposes `LogSink::history()` so the daemon CAN replay over the socket if a
+future client wants it; the command simply doesn't need it. `--follow` still prefers the
+daemon's live broadcast and falls back to file-tailing the newest session log when no
+daemon is up.
+
+### D-63. Per-extension session sinks use a tab-delimited record format (DESIGN §3.4)
+
+DESIGN §3.4 calls for "leveled timestamped per-extension sinks". The persisted line format
+is a tab-delimited record `ts_ms\tlevel\tkind\text\ttext` (the foundation stub wrote raw
+host text only). This structured form is the contract the dead-daemon file-tail fallback
+reconstructs each `LogLine` from (ts/level/kind/ext attribution survives a daemon
+restart); tabs/newlines in the message are flattened to spaces so a record stays one line.
+Lines fan out to both the per-extension file (when attributed) and a shared
+`_session/<session>.log` for host/unattributable lines. The frozen `LogSink`/`LogLine`
+surface is unchanged. The `ExtensionHost.txt` tail + parser (`tail_exthost`) and
+`map_through_sourcemap` (a small self-contained Base64-VLQ decoder over the dev build's
+emitted `.map` — no new crate, per SPEC D §5) are now implemented; activate-failure stack
+frames pointing at `dist/extension.js:L:C` are mapped back to `src` `file:line` and surfaced
+as a framed `ActivateFailed` line.
