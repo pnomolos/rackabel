@@ -1,39 +1,45 @@
-//! `rackabel-plugin.toml` — the OPTIONAL lifecycle-hook manifest a plugin may carry
-//! (DESIGN §5.3). PARSED INERT in 0.4 (milestone note).
+//! `rackabel-plugin.toml` — the lifecycle-hook manifest a tier-3 plugin carries
+//! (DESIGN §5.3). A REAL PARSED structure in 0.5 (was inert in 0.4).
 //!
-//! OWNED BY THE PLUGIN-MGMT AGENT (foundation-fill). A tier-3 plugin ships a
-//! `rackabel-plugin.toml` declaring named lifecycle hooks (`post_build`, `pre_deploy`,
-//! `on_reload`, …) bound to scripts it carries. The 0.5 milestone runs those hooks; 0.4
-//! does NOT execute anything. This module exists so `plugin install` can RECORD what 0.5
-//! will need: whether the installed plugin carried a manifest and the inert list of hook
-//! names it declared. Those land in the `plugins.lock` entry (`has_plugin_manifest` +
-//! `hooks`), `enabled = false` by default (enabling is the 0.5 consent gate, §5.7).
+//! FOUNDATION-OWNED. A tier-3 plugin ships a `rackabel-plugin.toml` declaring named
+//! lifecycle hooks (`post_build`, `pre_deploy`, `on_reload`, `doctor_check`,
+//! `new_template`) bound to scripts it carries, plus the tier-3 contract version
+//! (`hook_api`) it targets and an optional `[hooks.timeouts]` per-hook override table.
 //!
-//! The parser is deliberately lenient about FORWARD-COMPATIBILITY — it does not
-//! `deny_unknown_fields`, because a 0.5+ manifest may add tables/keys a 0.4 binary should
-//! still be able to install (we read only the hook NAMES). It is strict only about being
-//! valid TOML.
+//! 0.4 parsed this INERT — only the hook NAMES, recorded in `plugins.lock` so the
+//! install/list surface was ready. 0.5 turns it into a real model the discovery resolver
+//! and engine read: the `[hooks]`/`[hooks.timeouts]` tables are now a typed
+//! [`crate::hooks::manifest::HooksTable`], and `hook_api` is read so `plugin migrate` can
+//! detect a declared version this build doesn't support. We still RECORD the inert
+//! presence + hook-name list at install time (the lock keeps that for `plugin list`), and
+//! hooks remain `enabled = false` by default — enabling is the 0.5 consent gate (§5.7).
+//!
+//! The parser stays lenient about FORWARD-COMPATIBILITY — it does NOT
+//! `deny_unknown_fields`, so a 0.6+ manifest that adds tables/keys a 0.5 binary doesn't
+//! know still parses and installs (we read only the fields we understand). It is strict
+//! only about being valid TOML.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Deserialize;
 
 use crate::error::{CmdResult, ErrorCode, RkError};
+use crate::hooks::HookKind;
+use crate::hooks::manifest::HooksTable;
 
 /// The conventional manifest filename a plugin may carry at its root (§5.3).
 pub const PLUGIN_MANIFEST_NAME: &str = "rackabel-plugin.toml";
 
-/// The inert, parsed `rackabel-plugin.toml`. Only the hook NAMES are read in 0.4; the
-/// command/timeout/api fields a 0.5 binary will need are captured loosely so a forward
-/// manifest still parses.
+/// A parsed `rackabel-plugin.toml`. Forward-compatible (no `deny_unknown_fields`).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PluginManifest {
-    /// The `[hooks]` table: `<hook_name> = <command-or-table>`. We keep the raw TOML value
-    /// so a 0.5 manifest (where a hook may be a table with `command`/`timeout`) still
-    /// parses; 0.4 only needs the KEYS (the hook names).
+    /// The tier-3 hook-contract version the plugin targets (§5.2/§5.3). Absent ⇒ treated
+    /// as the floor (`1`) — an older plugin written before the key was conventional still
+    /// installs and runs against the v1 contract.
+    pub hook_api: Option<u32>,
+    /// The `[hooks]` + `[hooks.timeouts]` tables (§5.3), a typed [`HooksTable`].
     #[serde(default)]
-    pub hooks: BTreeMap<String, toml::Value>,
+    pub hooks: HooksTable,
 }
 
 impl PluginManifest {
@@ -72,9 +78,24 @@ impl PluginManifest {
     }
 
     /// The declared hook names, sorted (deterministic for the lockfile + transcripts).
-    /// Inert in 0.4 — no hook is executed; this is the list 0.5 will read.
+    /// This is the inert list `plugin install` records in `plugins.lock` (and `plugin
+    /// list` shows); the discovery resolver re-reads the full [`HooksTable`] for commands.
     pub fn hook_names(&self) -> Vec<String> {
-        self.hooks.keys().cloned().collect()
+        self.hooks
+            .declared_kinds()
+            .into_iter()
+            .map(|k| k.as_str().to_string())
+            .collect()
+    }
+
+    /// The hook kinds declared, in [`HookKind::ALL`] order.
+    pub fn declared_kinds(&self) -> Vec<HookKind> {
+        self.hooks.declared_kinds()
+    }
+
+    /// The `hook_api` the plugin targets, defaulting to the v1 floor when unset.
+    pub fn declared_hook_api(&self) -> u32 {
+        self.hook_api.unwrap_or(1)
     }
 }
 
@@ -86,21 +107,53 @@ mod tests {
     #[test]
     fn parses_hooks_table_names_only() {
         let src = r#"
+            hook_api = 1
             [hooks]
             post_build = ".rackabel/hooks/post-build"
-            pre_deploy = { command = ".rackabel/hooks/pre-deploy", timeout = 30 }
+            pre_deploy = "bin/pre-deploy"
         "#;
         let m = PluginManifest::parse(src, Path::new("rackabel-plugin.toml")).unwrap();
-        // Both forms (string + table) parse; we capture only the names, sorted.
         assert_eq!(m.hook_names(), vec!["post_build", "pre_deploy"]);
+        assert_eq!(m.declared_hook_api(), 1);
+        // The typed table is available for the engine/discovery.
+        assert_eq!(
+            m.hooks.command(HookKind::PostBuild),
+            Some(".rackabel/hooks/post-build")
+        );
+    }
+
+    #[test]
+    fn forward_table_form_entry_is_not_recorded_as_a_name() {
+        // A future `pre_deploy = { command = "x" }` parses but is not a v0.5 string
+        // command, so it is neither recorded nor runnable on this build.
+        let src = r#"
+            [hooks]
+            post_build = ".rackabel/hooks/post-build"
+            pre_deploy = { command = "bin/pre-deploy", timeout = 30 }
+        "#;
+        let m = PluginManifest::parse(src, Path::new("rackabel-plugin.toml")).unwrap();
+        assert_eq!(m.hook_names(), vec!["post_build"]);
+    }
+
+    #[test]
+    fn timeouts_table_parses() {
+        let src = r#"
+            [hooks]
+            post_build = "bin/pb"
+            [hooks.timeouts]
+            post_build = 120000
+        "#;
+        let m = PluginManifest::parse(src, Path::new("p")).unwrap();
+        assert_eq!(m.hooks.timeout_ms(HookKind::PostBuild), 120_000);
+        // The timeouts sub-table is not a hook name.
+        assert_eq!(m.hook_names(), vec!["post_build"]);
     }
 
     #[test]
     fn forward_compatible_unknown_top_level_tables() {
-        // A 0.5+ manifest may add tables a 0.4 binary doesn't know — it must still parse.
         let src = r#"
-            [meta]
             hook_api = 1
+            name = "rackabel-plugin-notarize"
             [hooks]
             on_reload = "x"
             [some_future_table]
@@ -114,6 +167,14 @@ mod tests {
     fn no_hooks_is_empty() {
         let m = PluginManifest::parse("", Path::new("p")).unwrap();
         assert!(m.hook_names().is_empty());
+        // Absent hook_api defaults to the v1 floor.
+        assert_eq!(m.declared_hook_api(), 1);
+    }
+
+    #[test]
+    fn higher_hook_api_is_read_verbatim() {
+        let m = PluginManifest::parse("hook_api = 2\n", Path::new("p")).unwrap();
+        assert_eq!(m.declared_hook_api(), 2);
     }
 
     #[test]
@@ -125,9 +186,7 @@ mod tests {
     #[test]
     fn load_from_dir_present_and_absent() {
         let tmp = tempdir().unwrap();
-        // Absent → Ok(None).
         assert!(PluginManifest::load_from_dir(tmp.path()).unwrap().is_none());
-        // Present → parsed.
         std::fs::write(
             tmp.path().join(PLUGIN_MANIFEST_NAME),
             "[hooks]\npost_build = \"x\"\n",

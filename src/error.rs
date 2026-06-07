@@ -142,6 +142,35 @@ pub enum ErrorCode {
     /// Conflict markers were written and a `help:` summary lists the files; the user
     /// resolves them. A validation failure (exit 4) — the tree needs a human decision.
     UpdateConflicts,
+    // -- lifecycle hooks (0.5, §5.3/§5.5/§5.7) --
+    /// An INFORMATIONAL hook (`post_build`/`on_reload`/`doctor_check`/`new_template`)
+    /// exited nonzero or timed out. Per §5.3 these hooks are logged + skipped and NEVER
+    /// abort their phase, so this code exists for `explain` (documenting the
+    /// informational-class decision) and for the log frame, NOT as a fatal command exit:
+    /// the engine returns an outcome the caller swallows. Classed build/runtime (exit 1)
+    /// for the rare path that does surface it (a hook explicitly run by a future verb),
+    /// matching "a crashing hook is logged and skipped" — never the deploy veto.
+    HookFailed,
+    /// A `pre_deploy` hook (the ONE veto, §5.3) exited nonzero or timed out — the deploy
+    /// ABORTS. Build/runtime class (exit 1): the deploy did not complete because a gate the
+    /// user enabled (a notarize check, etc.) refused it; the frame names the hook (§6.1).
+    PreDeployVetoed,
+    /// A hook exceeded its wall-clock timeout (§5.3): SIGTERM, then SIGKILL after a 5s
+    /// grace, then treated as a nonzero exit. A distinct code so `explain` can describe the
+    /// bounded-DoS mitigation; surfaced for a `pre_deploy` timeout (which aborts) and used
+    /// in the informational log line for the others. Build/runtime class (exit 1).
+    HookTimeout,
+    /// A plugin's `rackabel-plugin.toml` declares a `hook_api` GREATER than the version
+    /// this rackabel build supports (`HOOK_API`). The plugin's hooks cannot run safely
+    /// against an older contract. Environment class (exit 3): the machine's rackabel is too
+    /// old; the remedy is to upgrade rackabel (or `plugin migrate` once a codemod exists).
+    HookApiUnsupported,
+    /// `rackabel plugin migrate` was asked to migrate a plugin whose declared `hook_api`
+    /// exceeds this build's `HOOK_API`, and no codemod for that bump ships yet. Distinct
+    /// from `HookApiUnsupported` (which fires at hook-run time): this is the `migrate`
+    /// verb's own clear "unsupported frame" surface. Usage class (exit 2) — the command
+    /// cannot do what was asked. (`hook_api == HOOK_API` ⇒ "nothing to migrate", success.)
+    MigrateUnsupported,
 }
 
 impl ErrorCode {
@@ -188,6 +217,11 @@ impl ErrorCode {
             Self::SkippedIncompatible => "RK4006",
             Self::PinMismatch => "RK4007",
             Self::UpdateConflicts => "RK4008",
+            Self::MigrateUnsupported => "RK0104",
+            Self::HookApiUnsupported => "RK0405",
+            Self::HookFailed => "RK1309",
+            Self::PreDeployVetoed => "RK1310",
+            Self::HookTimeout => "RK1311",
         }
     }
 
@@ -200,9 +234,10 @@ impl ErrorCode {
     /// The exit class this code maps to. Keeps the frame and the exit code in sync.
     pub fn class(self) -> ExitClass {
         match self {
-            Self::UsageError | Self::NoSuchExtension | Self::PluginShadowedByBuiltin => {
-                ExitClass::Usage
-            }
+            Self::UsageError
+            | Self::NoSuchExtension
+            | Self::PluginShadowedByBuiltin
+            | Self::MigrateUnsupported => ExitClass::Usage,
             Self::NoManifest
             | Self::AmbiguousKind
             | Self::ManifestParse
@@ -222,7 +257,8 @@ impl ErrorCode {
             | Self::ProtocolMismatch
             | Self::NoDaemon
             | Self::HostCrashLooping
-            | Self::RegistryLocked => ExitClass::Environment,
+            | Self::RegistryLocked
+            | Self::HookApiUnsupported => ExitClass::Environment,
             // NameCollision is a usage mistake: the invocation can't be satisfied as
             // given (a `--name` colliding under `--no-input`), so it sits in the usage
             // class (2) like UsageError, per SPEC D §3.
@@ -234,7 +270,10 @@ impl ErrorCode {
             | Self::PackFailed
             | Self::ReloadActivateFailed
             | Self::HostLaunchFailed
-            | Self::TestFailed => ExitClass::BuildRuntime,
+            | Self::TestFailed
+            | Self::HookFailed
+            | Self::PreDeployVetoed
+            | Self::HookTimeout => ExitClass::BuildRuntime,
             Self::ManifestIncomplete
             | Self::ApiVersionTooHigh
             | Self::VersionNotBumped
@@ -288,6 +327,11 @@ impl ErrorCode {
         Self::SkippedIncompatible,
         Self::PinMismatch,
         Self::UpdateConflicts,
+        Self::HookFailed,
+        Self::PreDeployVetoed,
+        Self::HookTimeout,
+        Self::HookApiUnsupported,
+        Self::MigrateUnsupported,
     ];
 }
 
@@ -441,6 +485,21 @@ mod tests {
         // pin mismatch + update conflicts are validation (exit 4) so CI gates cleanly.
         assert_eq!(ErrorCode::PinMismatch.class(), ExitClass::Validation);
         assert_eq!(ErrorCode::UpdateConflicts.class(), ExitClass::Validation);
+    }
+
+    #[test]
+    fn hook_codes_are_classed_per_design() {
+        // §5.3 hook outcomes: informational + veto + timeout are build/runtime (exit 1).
+        assert_eq!(ErrorCode::HookFailed.class(), ExitClass::BuildRuntime);
+        assert_eq!(ErrorCode::PreDeployVetoed.class(), ExitClass::BuildRuntime);
+        assert_eq!(ErrorCode::HookTimeout.class(), ExitClass::BuildRuntime);
+        // An unsupported hook_api is an environment problem (rackabel too old, exit 3).
+        assert_eq!(
+            ErrorCode::HookApiUnsupported.class(),
+            ExitClass::Environment
+        );
+        // `plugin migrate` with no codemod is a usage outcome (exit 2).
+        assert_eq!(ErrorCode::MigrateUnsupported.class(), ExitClass::Usage);
     }
 
     #[test]

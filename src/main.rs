@@ -26,6 +26,11 @@ mod context;
 #[cfg(unix)]
 mod dev;
 mod error;
+// Lifecycle hooks (milestone 0.5, DESIGN §5.3/§5.5/§5.7): the tier-3 extensibility
+// surface — the frozen hook contract types, the project/plugin `[hooks]` manifest model,
+// hook discovery resolution, and the engine signature. Platform-independent (the engine
+// body spawns subprocesses through std), like the rest of the plugin model.
+mod hooks;
 mod manifest;
 mod max;
 // rackabel's own plugin model (milestone 0.4, DESIGN §5). Platform-independent (PATH

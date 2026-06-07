@@ -1310,3 +1310,33 @@ be checked out from one clone), `checkout`, and `merge_file` (an arg-array-safe 
 `git merge-file` per text file (per the task's "git merge-file per text file is fine");
 `--update` clones a LOCAL template repo into a tempdir rather than checking out commits in
 the user's own template work tree, so the source repo's HEAD is never mutated.
+
+### D-100. `plugin migrate` ships the SURFACE only; the codemod machinery is deferred (DESIGN §2/§5.3, milestone 0.5)
+
+The 0.5 foundation lands the hook-contract types (`hooks::*`), the `hook_api` parse in
+`rackabel-plugin.toml` (`PluginManifest::declared_hook_api`, defaulting to the v1 floor when
+unset), and the `HOOK_API = 1` const — but NOT a `plugin migrate` codemod. There are no
+hook-contract migrations yet (the supported `hook_api` is 1), so there is nothing to codemod.
+The DESIGN `plugin migrate` synopsis is honored as a SURFACE contract recorded here: detect a
+plugin's declared `hook_api` vs the supported `HOOK_API`; `== 1` => "nothing to migrate"
+(success); `> HOOK_API` => a clear UNSUPPORTED frame (`RK0104 MigrateUnsupported`, usage/exit 2)
+rather than a faked codemod. At hook-RUN time the same higher-`hook_api` plugin is refused with
+`RK0405 HookApiUnsupported` (environment/exit 3 — "your rackabel is too old"). The codemod
+engine is built one migration at a time when the FIRST `hook_api` bump ships (the ESLint-v9
+lesson). We deliberately do not fake a codemod.
+
+### D-101. Hook engine `run_hook` signature takes a `ResolvedHook` (source+command+timeout), not separate `(kind, source)` args (DESIGN §5.3, milestone 0.5 foundation)
+
+The milestone brief names the engine signature `run_hook(kind, payload, source: Project|Plugin,
+ctx) -> HookOutcome`. The frozen foundation signature is
+`run_hook(hook: &ResolvedHook, payload: &HookPayload, ctx: &Ctx) -> CmdResult<HookOutcome>`,
+which CARRIES the same information in a tighter contract: `ResolvedHook` bundles the source
+(`HookSource::Project { project_root } | Plugin { name, store_dir }` — exactly the
+Project|Plugin split), the hook KIND, the resolved command path, AND the per-hook timeout that
+discovery already computed (§5.3) — so the engine never re-derives the timeout or re-resolves
+the command, and `kind`/`payload.kind()` are debug-asserted to agree. `HookPayload` is the
+typed envelope over the five §5.3 stdin structs. The return is wrapped in `CmdResult` so an
+engine-level failure (a command path that does not exist) is a framed `RkError`, distinct from
+an in-contract `HookOutcome` (informational-skip / veto / doctor-row / template-choice). The
+BODY is a stub returning `RK1309` until the 0.5 feature agent lands the subprocess/timeout
+machinery; the signature is frozen now so callers compile against it.

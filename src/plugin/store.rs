@@ -773,6 +773,15 @@ fn read_manifest(dir: &Path) -> CmdResult<(bool, Vec<String>)> {
     }
 }
 
+/// Load the parsed `rackabel-plugin.toml` from an installed plugin's store dir, or
+/// `Ok(None)` when there is no manifest. The 0.5 hook-discovery resolver
+/// ([`crate::hooks::discovery`]) uses this to re-read a plugin's authoritative hook
+/// command + timeout (the lockfile holds only the inert hook NAMES). A parse error is
+/// surfaced framed (a corrupt manifest is not silently treated as "no hooks").
+pub fn load_plugin_manifest(store_dir: &Path) -> CmdResult<Option<PluginManifest>> {
+    PluginManifest::load_from_dir(store_dir)
+}
+
 /// Find the single `rackabel-<name>` executable directly inside `dir`.
 fn find_exe_in_dir(dir: &Path) -> CmdResult<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();

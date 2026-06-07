@@ -73,6 +73,11 @@ fn short_title(code: ErrorCode) -> &'static str {
         }
         ErrorCode::PinMismatch => "Installed plugin code does not match its lockfile pin",
         ErrorCode::UpdateConflicts => "A template update produced merge conflicts",
+        ErrorCode::HookFailed => "A lifecycle hook exited nonzero (logged and skipped)",
+        ErrorCode::PreDeployVetoed => "A pre_deploy hook vetoed the deploy",
+        ErrorCode::HookTimeout => "A lifecycle hook exceeded its timeout",
+        ErrorCode::HookApiUnsupported => "A plugin declares a hook_api newer than this build",
+        ErrorCode::MigrateUnsupported => "No codemod ships for that hook_api migration yet",
     }
 }
 
@@ -665,6 +670,95 @@ fn long_form(code: ErrorCode) -> &'static str {
                  <<<<<<< / ======= / >>>>>>> conflict markers, and save. `--update` is a\n\
                  deliberate developer action and never runs on the Persona-A happy path,\n\
                  so it never silently clobbers your setup."
+        }
+        ErrorCode::HookFailed => {
+            "A lifecycle hook exited nonzero (or its run otherwise failed), and the hook\n\
+             is an INFORMATIONAL one — post_build, on_reload, doctor_check, or\n\
+             new_template.\n\
+             \n\
+             By design (§5.3) these hooks are logged and SKIPPED on failure: a crashing\n\
+             third-party hook can never abort `build`, freeze the dev loop, or take down\n\
+             `doctor`. (Only `pre_deploy` may veto its phase — that is RK1310, not this\n\
+             code.) So this is not a fatal command outcome; it is the recorded reason a\n\
+             hook contributed nothing this run.\n\
+             \n\
+             To fix:\n\
+               - read the hook's output in the log (run with --raw for its full stderr),\n\
+                 fix the hook script, or `rackabel plugin disable <name>` to stop running\n\
+                 it. A project-local hook lives in your own `[hooks]` table — edit the\n\
+                 script it points at."
+        }
+        ErrorCode::PreDeployVetoed => {
+            "A `pre_deploy` hook exited nonzero, so the deploy was ABORTED.\n\
+             \n\
+             `pre_deploy` is the ONE lifecycle hook allowed to veto its phase (§5.3) — it\n\
+             exists precisely to gate a deploy (a notarize/signing check, a policy gate).\n\
+             A nonzero exit is the hook saying \"do not ship this\", so rackabel stops\n\
+             before copying anything into the User Library. The frame names the hook and\n\
+             its source.\n\
+             \n\
+             To fix:\n\
+               - read the hook's output for WHY it refused, satisfy that gate, and rerun;\n\
+                 or\n\
+               - `rackabel plugin disable <name>` to remove the gate (its consent), or\n\
+                 edit your project-local `[hooks].pre_deploy` script. The hook ran because\n\
+                 you enabled it — enabling is standing consent (§5.7)."
+        }
+        ErrorCode::HookTimeout => {
+            "A lifecycle hook exceeded its wall-clock timeout and was killed.\n\
+             \n\
+             Every hook runs under a timeout (default 30s, overridable per hook via\n\
+             `[hooks.timeouts] <hook> = <ms>`, §5.3). On timeout rackabel sends SIGTERM,\n\
+             then SIGKILL after a 5s grace, and treats the result as a hook failure. This\n\
+             bounds the \"just never exit\" denial-of-service: an enabled `post_build` or\n\
+             `on_reload` runs on EVERY save, and a hanging `pre_deploy` would block deploys\n\
+             forever — the timeout makes the loop continue (or the deploy fail fast)\n\
+             instead.\n\
+             \n\
+             A timed-out informational hook is logged + skipped; a timed-out `pre_deploy`\n\
+             aborts the deploy (RK1310 semantics) with the timeout named.\n\
+             \n\
+             To fix:\n\
+               - speed up the hook, or raise its budget in `[hooks.timeouts]` (the hook's\n\
+                 `rackabel-plugin.toml`, or next to a project-local `[hooks]`), or\n\
+               - `rackabel plugin disable <name>` if it is wedged. A hook that reads stdin\n\
+                 forever is a common cause: rackabel writes ONE JSON object then closes\n\
+                 stdin, so read to EOF and stop."
+        }
+        ErrorCode::HookApiUnsupported => {
+            "An installed plugin's `rackabel-plugin.toml` declares a `hook_api` NEWER than\n\
+             the hook contract this rackabel build supports.\n\
+             \n\
+             The tier-3 hook contract is versioned by its own integer, `hook_api` (§5.2),\n\
+             separate from rackabel's product version and from the tier-2 env contract.\n\
+             A plugin declaring `hook_api = N` expects the version-N stdin/stdout contract;\n\
+             if your rackabel only speaks an older version, running its hooks could\n\
+             misinterpret the contract, so rackabel refuses rather than guess. This is an\n\
+             environment problem (exit 3): the machine's rackabel is too old.\n\
+             \n\
+             To fix:\n\
+               - upgrade rackabel to a build that supports the plugin's `hook_api`, or\n\
+               - `rackabel plugin migrate <name>` once a codemod ships for that bump, or\n\
+               - `rackabel plugin disable <name>` to stop invoking its hooks meanwhile\n\
+                 (a tier-2 PATH subcommand the same plugin ships still works)."
+        }
+        ErrorCode::MigrateUnsupported => {
+            "`rackabel plugin migrate` was asked to migrate a plugin across a `hook_api`\n\
+             bump this build has no codemod for.\n\
+             \n\
+             Hook-contract changes ship ONE at a time, each with a `plugin migrate` codemod\n\
+             (§5.3, the ESLint-v9 lesson: never batch breaking plugin-contract changes).\n\
+             Today the supported `hook_api` is 1 and no migrations exist yet: a plugin\n\
+             declaring `hook_api = 1` reports \"nothing to migrate\" (success), and a plugin\n\
+             declaring a HIGHER version has no codemod to run — this code is that clear\n\
+             \"unsupported\" frame, not a crash.\n\
+             \n\
+             To fix:\n\
+               - if the plugin targets a NEWER contract, upgrade rackabel to a build that\n\
+                 ships the migration, then rerun `plugin migrate`; or\n\
+               - if you authored the plugin, target the `hook_api` this rackabel supports.\n\
+             Run `rackabel plugin migrate <name>` to see the detected vs supported\n\
+             versions."
         }
     }
 }

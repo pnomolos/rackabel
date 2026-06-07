@@ -41,6 +41,11 @@ pub struct ManifestRaw {
     /// accepts a manifest that carries it (without it, `deny_unknown_fields` would reject
     /// `[dev]` as RK0003 while the watch loop read it separately — D-65).
     pub dev: Option<Dev>,
+    /// `[hooks]` + `[hooks.timeouts]` — PROJECT-LOCAL lifecycle hooks (milestone 0.5,
+    /// DESIGN §5.5). The user's OWN repo scripts, run with no plugin manifest and no enable
+    /// step (implicit trust); paths are relative to the project root. Optional, like
+    /// `[dev]`, so a manifest without it parses under `deny_unknown_fields`.
+    pub hooks: Option<crate::hooks::manifest::HooksTable>,
 }
 
 /// `[extension]` — all fields optional with documented inference (DESIGN §4.2).
@@ -362,6 +367,14 @@ impl Project {
     fn manifest_path_string(&self) -> String {
         self.root.join(MANIFEST_NAME).display().to_string()
     }
+
+    /// The project-local `[hooks]` table (DESIGN §5.5), if the manifest declares one.
+    /// These run with implicit trust (the user's own repo, no enable step). The hook
+    /// discovery resolver ([`crate::hooks::discovery::resolve`]) takes this + the project
+    /// root as its project source; commands are relative to [`Self::root`].
+    pub fn hooks_table(&self) -> Option<&crate::hooks::manifest::HooksTable> {
+        self.raw.hooks.as_ref()
+    }
 }
 
 /// The host platform-arch string used as the default single pack target
@@ -523,6 +536,30 @@ mod tests {
         );
         let err = Project::discover(tmp.path()).unwrap().kind().unwrap_err();
         assert_eq!(err.code, ErrorCode::AmbiguousKind);
+    }
+
+    #[test]
+    fn project_local_hooks_table_parses() {
+        use crate::hooks::HookKind;
+        let tmp = tempdir().unwrap();
+        write_manifest(
+            tmp.path(),
+            "[extension]\nname=\"x\"\n[hooks]\npost_build = \".rackabel/hooks/post-build\"\n",
+        );
+        let p = Project::discover(tmp.path()).unwrap();
+        let table = p.hooks_table().expect("a [hooks] table");
+        assert_eq!(
+            table.command(HookKind::PostBuild),
+            Some(".rackabel/hooks/post-build")
+        );
+    }
+
+    #[test]
+    fn manifest_without_hooks_parses_and_has_none() {
+        let tmp = tempdir().unwrap();
+        write_manifest(tmp.path(), "[extension]\nname=\"x\"\n");
+        let p = Project::discover(tmp.path()).unwrap();
+        assert!(p.hooks_table().is_none());
     }
 
     #[test]
