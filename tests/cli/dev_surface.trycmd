@@ -24,8 +24,9 @@ A `dev` verb that needs a running daemon, with none up, is an ENVIRONMENT error
 ```
 $ rackabel dev reload --no-input
 ? 3
-error: `rackabel dev reload` is not implemented yet [RK0309]
-  help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
+error: no dev host is running [RK0309]
+  --> [..]/daemon
+  help: start it with `rackabel dev` (or `rackabel dev start`), then retry
 (run `rackabel explain RK0309` for details)
 
 ```

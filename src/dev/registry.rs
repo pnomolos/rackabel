@@ -140,9 +140,13 @@ impl Registry {
     /// Add a single manifest-bearing path to the registry. Returns the (possibly
     /// disambiguated) name actually used. `--name` (if `name`) is honored verbatim
     /// when free; otherwise the dir basename is disambiguated against existing names
-    /// and the reserved verbs. The REGISTRY agent owns the interactive/`--no-input`
-    /// `RK0312 NameCollision` policy when an explicit `--name` collides; the
-    /// foundation default auto-disambiguates so the model is always consistent.
+    /// and the reserved verbs.
+    ///
+    /// An explicit `--name` that collides with an existing entry or a reserved verb is
+    /// auto-disambiguated here (parent-prefixed). The interactive/`--no-input`
+    /// `RK0312 NameCollision` decision lives in the `register` verb (it inspects
+    /// [`name_outcome`] before calling `add`); this method is the always-consistent
+    /// model default so a programmatic caller never gets a duplicate name.
     pub fn add(
         &mut self,
         path: &Path,
@@ -174,9 +178,58 @@ impl Registry {
         Ok(chosen)
     }
 
+    /// Store an entry under a caller-decided `name` (already resolved by the verb's
+    /// policy), guarding only the hard invariant — names are UNIQUE. Unlike [`add`],
+    /// this does NOT re-disambiguate against the reserved verbs, so a forced verb-name
+    /// (`register --name status`, accepted with a warning) is stored verbatim; such an
+    /// entry is reachable only via `--only`/`--`, never the bare `dev` parse. An entry
+    /// collision is still rejected (`RK0312`) — the caller must have resolved it first.
+    pub fn add_named(&mut self, path: &Path, name: String, disabled: bool) -> CmdResult<String> {
+        let root = require_manifest_dir(path)?;
+        if self.taken_names().contains(&name) {
+            return Err(RkError::of(
+                ErrorCode::NameCollision,
+                format!("the name `{name}` is already taken"),
+                "choose a free name and rerun",
+            ));
+        }
+        self.entries.push(RegistryEntry {
+            name: name.clone(),
+            path: root,
+            source: super::Source::Dist,
+            enabled: !disabled,
+        });
+        Ok(name)
+    }
+
+    /// Classify how a candidate name would be resolved before it is added, so the
+    /// `register` verb can echo a disambiguation / warn on a forced verb-collision /
+    /// raise `RK0312` under `--no-input`. Pure (does not mutate the registry).
+    pub fn name_outcome(&self, candidate: &str, parent: &Path) -> NameOutcome {
+        let taken = self.taken_names();
+        let collides_entry = taken.contains(candidate);
+        let collides_verb = DEV_VERBS.contains(&candidate);
+        if !collides_entry && !collides_verb {
+            return NameOutcome::Free;
+        }
+        let resolved = Self::disambiguate(candidate, parent, &taken);
+        if collides_entry {
+            NameOutcome::CollidesEntry { resolved }
+        } else {
+            NameOutcome::CollidesVerb { resolved }
+        }
+    }
+
     /// Register every manifest-bearing subdir of `root` (the monorepo / `--recursive`
-    /// case, §3.2). Returns the names added, in walk order. Collisions across members
-    /// are auto-disambiguated as they are discovered.
+    /// case, §3.2 / §4.4). Returns the names added, in deterministic order. Collisions
+    /// across members are auto-disambiguated as they are discovered.
+    ///
+    /// Member discovery (§4.4): if `root` itself bears a manifest declaring a
+    /// `[workspace]` with `members` globs, those globs (relative to `root`) drive the
+    /// scan; otherwise the whole subtree is walked for `rackabel.toml` files. Either
+    /// way, **library members are skipped** — a member directory with no manifest, or a
+    /// manifest that declares neither `[extension]` nor `[device]` (a shared `lib`), is
+    /// not registrable as a dev-host extension and is silently passed over.
     pub fn add_recursive(
         &mut self,
         root: &Path,
@@ -184,7 +237,7 @@ impl Registry {
         ctx: &Ctx,
     ) -> CmdResult<Vec<String>> {
         let mut added = Vec::new();
-        for dir in manifest_dirs(root) {
+        for dir in recursive_member_dirs(root) {
             // Skip already-registered paths (idempotent re-register).
             let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
             let already = self.entries.iter().any(|e| {
@@ -311,6 +364,105 @@ impl Registry {
             }
         }
         unreachable!("the numeric-suffix loop always terminates")
+    }
+}
+
+/// How a candidate registry name resolves against the existing entries + reserved
+/// verbs (see [`Registry::name_outcome`]). The `register` verb turns this into the
+/// echo / warning / `RK0312` behavior of §3.2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameOutcome {
+    /// The candidate is usable verbatim.
+    Free,
+    /// The candidate equals an existing entry's name; `resolved` is what `add` would
+    /// pick instead (parent-prefixed). Under `--no-input` an explicit `--name`
+    /// collision here is `RK0312` (can't silently rename what the user asked for).
+    CollidesEntry { resolved: String },
+    /// The candidate equals a reserved dev verb; `resolved` is the parent-prefixed
+    /// alternative. The auto name path takes `resolved` and echoes it; an explicit
+    /// `--name` that equals a verb is *forced* with a warning (only `--only`/`--` can
+    /// then target it, never the bare `dev` parse).
+    CollidesVerb { resolved: String },
+}
+
+/// The member directories a `--recursive` register should consider (§4.4). When `root`
+/// bears a manifest with a `[workspace]` `members` list, the globs (relative to `root`)
+/// are expanded and each matched directory is taken as a member; otherwise the whole
+/// subtree is scanned for `rackabel.toml`. In both cases a member that is NOT a
+/// registrable extension/device project (no manifest, or a library manifest declaring
+/// neither table) is dropped — only loadable dev-host projects come back.
+fn recursive_member_dirs(root: &Path) -> Vec<PathBuf> {
+    let candidates = match workspace_members(root) {
+        Some(members) => members,
+        None => manifest_dirs(root),
+    };
+    let mut out: Vec<PathBuf> = candidates
+        .into_iter()
+        .filter(|dir| is_registrable_project(dir))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// If `root/rackabel.toml` declares a `[workspace]`, expand its `members` globs
+/// (relative to `root`) into the set of matched directories. Returns `None` when
+/// `root` is not a workspace manifest (the manifest-scan fallback applies).
+fn workspace_members(root: &Path) -> Option<Vec<PathBuf>> {
+    let project = Project::discover(root).ok()?;
+    // The discovered manifest must be AT `root` (not an ancestor) to count as the
+    // workspace root being registered.
+    if std::fs::canonicalize(&project.root).ok() != std::fs::canonicalize(root).ok() {
+        return None;
+    }
+    let ws = project.raw.workspace.as_ref()?;
+    if ws.members.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut dirs = Vec::new();
+    for pattern in &ws.members {
+        let glob = match globset::Glob::new(pattern) {
+            Ok(g) => g.compile_matcher(),
+            Err(_) => continue,
+        };
+        // Walk the subtree and match each directory's path RELATIVE to root against the
+        // member glob, so `packages/*` selects the package dirs.
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| {
+                let name = e.file_name().to_string_lossy();
+                !(name == "node_modules" || name == "dist" || name == ".git")
+            })
+            .filter_map(|e| e.ok())
+        {
+            if !entry.file_type().is_dir() {
+                continue;
+            }
+            if let Ok(rel) = entry.path().strip_prefix(root)
+                && !rel.as_os_str().is_empty()
+                && glob.is_match(rel)
+            {
+                dirs.push(entry.path().to_path_buf());
+            }
+        }
+    }
+    Some(dirs)
+}
+
+/// True if `dir` holds a manifest that declares a registrable dev-host project
+/// (`[extension]` or `[device]`). A directory with no manifest, or a manifest that
+/// declares only `[workspace]` / nothing (a shared library member), is not
+/// registrable and is skipped by `--recursive`.
+fn is_registrable_project(dir: &Path) -> bool {
+    let manifest = dir.join(MANIFEST_NAME);
+    if !manifest.is_file() {
+        return false;
+    }
+    match Project::discover(dir) {
+        Ok(p) if std::fs::canonicalize(&p.root).ok() == std::fs::canonicalize(dir).ok() => {
+            p.raw.extension.is_some() || p.raw.device.is_some()
+        }
+        _ => false,
     }
 }
 
@@ -605,6 +757,132 @@ mod tests {
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0].0.name, "bad");
         assert!(skipped[0].1.contains("2.0.0"));
+    }
+
+    fn write_workspace(root: &Path, members: &[&str]) {
+        std::fs::create_dir_all(root).unwrap();
+        let list = members
+            .iter()
+            .map(|m| format!("\"{m}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            root.join(MANIFEST_NAME),
+            format!("[workspace]\nmembers = [{list}]\n"),
+        )
+        .unwrap();
+    }
+
+    /// `--recursive` over a `[workspace].members` monorepo: every matched member that is
+    /// an extension project is registered; a library member (no `[extension]`) is
+    /// skipped; the manifest-scan fallback would have caught the lib, the workspace
+    /// globs deliberately do not.
+    #[test]
+    fn add_recursive_uses_workspace_members_and_skips_libraries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let root = tmp.path().join("mono");
+        write_workspace(&root, &["packages/*"]);
+        write_project(&root.join("packages/foo"), None);
+        write_project(&root.join("packages/bar"), None);
+        // A library member matched by the glob but declaring no [extension]: skipped.
+        write_workspace(&root.join("packages/shared-lib"), &[]);
+        // A manifest OUTSIDE the member globs: not selected at all.
+        write_project(&root.join("tools/helper"), None);
+
+        let mut reg = Registry::load(&ctx).unwrap();
+        let names = reg.add_recursive(&root, false, &ctx).unwrap();
+        let set: HashSet<_> = names.iter().cloned().collect();
+        assert_eq!(set, ["foo", "bar"].iter().map(|s| s.to_string()).collect());
+    }
+
+    /// With no `[workspace]` manifest at the root, `--recursive` falls back to a full
+    /// manifest scan, still skipping library members (manifests with no [extension]).
+    #[test]
+    fn add_recursive_flat_layout_skips_library_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let root = tmp.path().join("flat");
+        write_project(&root.join("ext-one"), None);
+        write_project(&root.join("nested/ext-two"), None);
+        write_workspace(&root.join("nested/lib"), &[]); // library: skipped
+
+        let mut reg = Registry::load(&ctx).unwrap();
+        let names = reg.add_recursive(&root, false, &ctx).unwrap();
+        let set: HashSet<_> = names.iter().cloned().collect();
+        assert_eq!(
+            set,
+            ["ext-one", "ext-two"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
+        );
+    }
+
+    #[test]
+    fn name_outcome_classifies_free_entry_and_verb() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let proj = tmp.path().join("packages/thing");
+        write_project(&proj, None);
+        let mut reg = Registry::load(&ctx).unwrap();
+        reg.add(&proj, None, false, &ctx).unwrap();
+
+        // Free.
+        assert_eq!(
+            reg.name_outcome("fresh", Path::new("/x/fresh")),
+            NameOutcome::Free
+        );
+        // Entry collision → parent-prefixed resolution.
+        match reg.name_outcome("thing", Path::new("/code/pkg/thing")) {
+            NameOutcome::CollidesEntry { resolved } => assert_eq!(resolved, "pkg-thing"),
+            other => panic!("expected entry collision, got {other:?}"),
+        }
+        // Verb collision (even with no entry of that name).
+        match reg.name_outcome("status", Path::new("/code/pkg/status")) {
+            NameOutcome::CollidesVerb { resolved } => assert_eq!(resolved, "pkg-status"),
+            other => panic!("expected verb collision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_named_stores_verbatim_but_rejects_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let proj = tmp.path().join("vd");
+        write_project(&proj, None);
+        let mut reg = Registry::load(&ctx).unwrap();
+        // A verb name forced through (the register verb's --name-equals-verb path).
+        let stored = reg.add_named(&proj, "status".to_string(), false).unwrap();
+        assert_eq!(stored, "status");
+        assert_eq!(reg.find("status").unwrap().name, "status");
+        // A duplicate is rejected with RK0312.
+        let proj2 = tmp.path().join("vd2");
+        write_project(&proj2, None);
+        let err = reg
+            .add_named(&proj2, "status".to_string(), false)
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::NameCollision);
+    }
+
+    #[test]
+    fn prefilter_keeps_unparseable_and_absent() {
+        // An extension with no minimumApiVersion, and one with a junk version, are both
+        // KEPT (the build/validate path surfaces those; the pre-filter only drops a
+        // cleanly-parsed version that exceeds the host).
+        let tmp = tempfile::tempdir().unwrap();
+        let none = tmp.path().join("none");
+        write_project(&none, None);
+        let entries = vec![RegistryEntry {
+            name: "none".into(),
+            path: none,
+            source: super::super::Source::Dist,
+            enabled: true,
+        }];
+        let host = semver::Version::parse("1.0.0").unwrap();
+        let (kept, skipped) = Registry::prefilter(&entries, &host);
+        assert_eq!(kept.len(), 1);
+        assert!(skipped.is_empty());
     }
 
     #[test]

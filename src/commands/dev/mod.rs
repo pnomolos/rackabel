@@ -28,7 +28,8 @@ pub mod watch_cmd;
 
 use crate::cli::{DaemonArgs, DevArgs, DevCommand};
 use crate::context::Ctx;
-use crate::error::CmdResult;
+use crate::dev::ipc::Client;
+use crate::error::{CmdResult, ErrorCode, RkError};
 
 /// Dispatch `rackabel dev …`. A verb routes to its (stubbed) handler; the bare form
 /// (no verb) routes to the watch loop via [`watch_cmd::run_bare`].
@@ -49,6 +50,40 @@ pub fn run(args: DevArgs, ctx: &Ctx) -> CmdResult<()> {
         // No verb → the flagship bare loop (start-if-needed + watch + tail).
         None => watch_cmd::run_bare(&args, ctx),
     }
+}
+
+/// Connect to a running dev-host daemon's control socket, or `RK0309` if none is up.
+///
+/// Registry-side verbs (`reload`) must work without first resolving Live (so the
+/// no-daemon case is a clean `exit 3` even on a machine with no Live install — the
+/// §6.2 / §7 contract). We therefore locate the daemon by scanning `~/.rackabel/daemon`
+/// for `*.sock` files and connecting to the first one that answers, rather than going
+/// through full Live resolution (which could fail with an unrelated `RK0303`). With
+/// one daemon per Live install this is unambiguous in the common case; a future
+/// multi-Live disambiguation can key off the resolved socket hash.
+pub(crate) fn connect_daemon(ctx: &Ctx) -> CmdResult<Client> {
+    let dir = crate::dev::daemon_dir(ctx);
+    let mut last_err: Option<RkError> = None;
+    if let Ok(read) = std::fs::read_dir(&dir) {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("sock") {
+                continue;
+            }
+            match Client::connect(&path) {
+                Ok(client) => return Ok(client),
+                Err(e) => last_err = Some(e),
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        RkError::of(
+            ErrorCode::NoDaemon,
+            "no dev host is running",
+            "start it with `rackabel dev` (or `rackabel dev start`), then retry",
+        )
+        .at(dir.display().to_string())
+    }))
 }
 
 /// The hidden `__daemon` re-exec target (DESIGN §3.1). Bridges the clap args to the
