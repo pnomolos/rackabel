@@ -32,6 +32,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # sha256 pinning for `plugin install` (plugins.lock), §5.4. A pure-Rust hash with no
 # system/openssl dependency — the install/verify path hashes downloaded assets/tarballs.
 sha2 = "0.10"
+# Temp dirs for tier-1 templates (§5.5): the remote-clone holder and the old/new render
+# scratch trees `new --update` 3-way-merges. Promoted from a dev-dependency because the
+# template render/update paths use it at runtime, not only in tests.
+tempfile = "3"
 
 # Daemon mechanics (SPEC D §5): setsid/setpgid (pre_exec), killpg, and kill(pid, None)
 # liveness probing. std exposes none of these portably, so the dev-host daemon/host/ipc
@@ -43,7 +47,7 @@ libc = "0.2"
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-tempfile = "3"
+# tempfile is now a normal dependency (templates use it at runtime); tests share it.
 trycmd = "0.15"
 
 # The integration tests live under tests/integration/ so they can share a

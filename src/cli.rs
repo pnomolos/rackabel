@@ -477,6 +477,11 @@ pub struct NewArgs {
     #[arg(long)]
     pub update: bool,
 
+    /// With `--update`: print the merge plan (which files would apply/conflict/skip)
+    /// and exit, mutating nothing (§5.5).
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Where to find the gated SDK/CLI toolkit (recursively searched).
     #[arg(long, value_name = "DIR")]
     pub sdk_dir: Option<PathBuf>,

@@ -29,6 +29,10 @@ mod dev_watch;
 mod doctor;
 mod new;
 mod pack;
+// Tier-1 template rendering (`new --template`) + `new --update` 3-way merge (milestone
+// 0.4, TEMPLATES). Hermetic: LOCAL git fixture repos in tempdirs + the file:// rewrite
+// seam; never the network. Gated on a real `git` on PATH.
+mod templates;
 // The PATH-subcommand exec path + env contract + built-in precedence (milestone 0.4,
 // FOUNDATION). Unix-only (the fixture plugins are shell scripts with exec bits).
 #[cfg(unix)]

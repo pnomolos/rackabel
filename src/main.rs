@@ -33,6 +33,10 @@ mod max;
 // is available on every platform, unlike the `#[cfg(unix)]` dev host.
 mod plugin;
 mod services;
+// Tier-1 templates (milestone 0.4, DESIGN §5.5): `new --template` rendering + `new
+// --update`'s 3-way merge. Platform-independent (the only OS dependency is shelling the
+// system `git` binary through the foundation wrapper), like the rest of the plugin model.
+mod templates;
 mod ui;
 
 use std::process::ExitCode;

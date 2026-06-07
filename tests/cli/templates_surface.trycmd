@@ -1,0 +1,63 @@
+Tier-1 template surfaces that are deterministic on any machine (DESIGN §5.5/§5.7): the
+remote-confirmation refusal under --no-input, a malformed ref, and `new --update` with no
+tracked template. These never touch the network or the dev host; the git-backed render /
+3-way-merge paths are covered by the hermetic integration tests (LOCAL fixture repos).
+
+A REMOTE template under --no-input without --yes REFUSES at the §5.7 confirmation gate
+(RK0403, exit 3) — it never silently fetches/builds, and never falls back to the default.
+
+```
+$ rackabel new x --no-input --template gh:owner/repo
+? 3
+  Resolving template gh:owner/repo…
+This is a REMOTE template — unreviewed third-party code.
+  source:  gh:owner/repo
+  fetch:   https://github.com/owner/repo
+  warning: `new` will fetch this repo AND run its build configuration with your
+           full privileges (scaffold-time code execution). Only proceed if you
+           trust the source.
+error: remote template `gh:owner/repo` needs confirmation, but --no-input forbids the prompt [RK0403]
+  --> gh:owner/repo
+  help: pass --yes to consent to fetching AND building this third-party template in a script, or use the built-in default / a local path instead
+(run `rackabel explain RK0403` for details)
+
+```
+
+A malformed `--template` ref is a usage error (exit 2), caught before any work.
+
+```
+$ rackabel new x --no-input --template gh:owner
+? 2
+error: `gh:owner` is not a valid template reference [RK0101]
+  --> gh:owner
+  help: use gh:owner/repo[@ref], @scope/name, or a local path
+(run `rackabel explain RK0101` for details)
+
+```
+
+A `@scope/name` ref is accepted + classified, but npm-registry resolution is out of scope
+for 0.4 — a clear not-yet-supported frame (RK0402), never a half-implementation.
+
+```
+$ rackabel new x --no-input --template @acme/starter
+? 3
+  Resolving template @acme/starter…
+error: scoped templates like `@acme/starter` are not supported yet [RK0402]
+  --> @acme/starter
+  help: 0.4 resolves gh:owner/repo[@ref] and local paths; for a scoped package, point --template at its GitHub repo (gh:owner/repo) or a local checkout instead
+(run `rackabel explain RK0402` for details)
+
+```
+
+`new --update` in a directory that was not scaffolded from a tracked template is a clear
+"nothing to update" (RK0402, exit 3) — never a silent re-scaffold.
+
+```
+$ rackabel new --update --no-input
+? 3
+error: this project has no .rackabel-template to update from [RK0402]
+  --> [..]
+  help: `new --update` re-runs the template that scaffolded a project; this directory was not created from a tracked template (no .rackabel-template present)
+(run `rackabel explain RK0402` for details)
+
+```

@@ -44,7 +44,7 @@ pub fn run(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     // kind resolution. The TEMPLATES agent fills the merge; the foundation routes it to a
     // clear boundary over the frozen `.rackabel-template` lockfile model.
     if args.update {
-        return run_update(ctx);
+        return run_update(args, ctx);
     }
 
     // Resolve the kind. When unspecified and interactive, the wizard asks; under
@@ -56,32 +56,12 @@ pub fn run(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     }
 }
 
-/// `new --update` (DESIGN §5.5) — STUB over the frozen template-lock model.
-///
-/// OWNED BY THE TEMPLATES AGENT. The foundation reads `.rackabel-template` (the persisted
-/// repo+ref+commit+answers) so the boundary is honest: a project NOT made from a tracked
-/// template gets a clear "nothing to update", and one that was gets the not-implemented
-/// frame (the 3-way merge + `[merge].exclude` + conflict UX land with templates).
-fn run_update(ctx: &Ctx) -> CmdResult<()> {
-    use crate::plugin::template::TemplateLock;
-
-    let lock = TemplateLock::load(&ctx.cwd)?;
-    let Some(lock) = lock else {
-        return Err(RkError::of(
-            ErrorCode::TemplateNotFound,
-            "this project has no .rackabel-template to update from",
-            "`new --update` re-runs the template that scaffolded a project; this directory \
-             was not created from a tracked template (no .rackabel-template present)",
-        )
-        .at(ctx.cwd.display().to_string()));
-    };
-
-    Err(RkError::of(
-        ErrorCode::TemplateNotFound,
-        format!("`new --update` from `{}` is not implemented yet", lock.repo),
-        "the copier-style 3-way merge (re-render at the new commit, [merge].exclude, \
-         conflict markers) lands with the 0.4 template work; the lockfile model is in place",
-    ))
+/// `new --update` (DESIGN §5.5) — the copier-style 3-way template merge over the current
+/// project. Reads `.rackabel-template`, re-renders old@oldcommit + new@newcommit (re-using
+/// saved answers, prompting only for NEW prompts), and 3-way-merges against the user tree;
+/// `--dry-run` prints the plan. An explicit developer action — never on the happy path.
+fn run_update(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
+    crate::templates::update::run(ctx, args.dry_run, args.yes)
 }
 
 /// Resolve the project kind: explicit `--kind` wins; else prompt (or default Extension
@@ -111,14 +91,14 @@ fn resolve_kind(args: &NewArgs, ctx: &Ctx) -> CmdResult<ProjectKind> {
 // ===========================================================================
 
 fn new_extension(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
-    // A `--template` ref is classified through the FROZEN `TemplateSource` surface
-    // (§5.5). A REMOTE ref (gh:/@scope) is third-party code that the auto-build would
-    // execute, so it requires the §5.7 confirmation + fetch — owned by the TEMPLATES
-    // agent. The foundation routes it to a clear boundary (and a local-path template is
-    // likewise not yet applied — that lands with tier-1 templates). The built-in default
-    // (no --template) takes the existing happy path below.
+    // A `--template` ref renders a tier-1 template (§5.5): a git repo / local dir holding
+    // a `rackabel-template.toml` whose `[prompts]` drive the wizard and whose files carry
+    // `{{ key }}` placeholders. A REMOTE ref (gh:/@scope) is third-party code that `new`'s
+    // auto-build would execute, so it hits the §5.7 confirmation first (local + the
+    // built-in default skip it). The built-in default (no --template) takes the existing
+    // happy path below.
     if let Some(tref) = &args.template {
-        return Err(template_not_implemented(tref));
+        return new_from_template(tref, args, ctx);
     }
 
     // 1. The wizard — flag-driven, prompt-filled, --no-input-safe. Defaults are seeded
@@ -204,6 +184,65 @@ fn new_extension(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     }
     maybe_auto_build(&root, &wiz.dir_name, ctx);
 
+    Ok(())
+}
+
+/// Scaffold from a tier-1 `--template` (§5.5). The directory name comes from the
+/// positional `name` (the template's own `[prompts]` drive its file content). A remote ref
+/// hits the §5.7 confirmation (we pass `--yes` as the consent). The template tree is
+/// rendered with `{{ key }}` substitution, the `.rackabel-template` lockfile is written
+/// (so `new --update` works), and git-init runs by default just like the built-in path.
+fn new_from_template(tref: &str, args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
+    // The directory name: the positional name (required for a template scaffold — the
+    // template's prompts may also ask for a name, but the project FOLDER needs one now).
+    let dir_name = match &args.name {
+        Some(n) => dir_name_of(n),
+        None => {
+            return Err(RkError::of(
+                ErrorCode::UsageError,
+                "a project name is required when scaffolding from a template",
+                "pass it as the first argument, e.g. `rackabel new <name> --template <ref>`",
+            ));
+        }
+    };
+
+    let root = ctx.cwd.join(&dir_name);
+    if root.exists() {
+        return Err(RkError::of(
+            ErrorCode::UsageError,
+            format!("`{dir_name}` already exists"),
+            "choose a different name, or remove the existing directory",
+        )
+        .at(root.display().to_string()));
+    }
+
+    if ctx.echo_on() && crate::templates::is_remote_ref(tref) {
+        println!("  Resolving template {tref}…");
+    }
+
+    // Render: resolve (+ remote confirm) + prompt + substitute + write the lockfile. On
+    // any failure before files land, nothing is left behind; if files were partially
+    // written the directory exists and the framed error names the problem.
+    let outcome = crate::templates::render_into(tref, &root, args.yes, ctx)?;
+
+    // git-init by default (unless --no-git / --minimal), mirroring the built-in path.
+    if resolve_git(args) {
+        git_init(&root, ctx);
+    }
+
+    if ctx.echo_on() {
+        ui::frame::emit(
+            ui::frame::Symbol::Good,
+            &format!("created {dir_name}/ from template {tref}"),
+            ctx,
+        );
+        if !outcome.answers.is_empty() {
+            println!(
+                "  (answers saved to .rackabel-template — `rackabel new --update` re-runs this template)"
+            );
+        }
+        println!("  next:  cd {dir_name} && rackabel build");
+    }
     Ok(())
 }
 
@@ -469,36 +508,6 @@ fn maybe_auto_build(root: &Path, dir_name: &str, ctx: &Ctx) {
 
 // --- small helpers ----------------------------------------------------------
 
-/// Frame the not-yet-implemented boundary for a `--template` ref (§5.5), classifying it
-/// through the frozen [`crate::plugin::source::TemplateSource`] so the message is precise
-/// (a remote ref vs a local path) and a clearly-malformed ref is a usage error. The
-/// TEMPLATES agent fills the resolution/fetch/render.
-fn template_not_implemented(tref: &str) -> RkError {
-    use crate::plugin::source::TemplateSource;
-    match TemplateSource::parse(tref) {
-        Some(src) if src.is_remote() => RkError::of(
-            ErrorCode::TemplateNotFound,
-            format!("remote template `{}` is not implemented yet", src.display()),
-            "remote template fetch (with the §5.7 confirmation + auto-build) lands with the \
-             0.4 template work; for now omit --template to use the built-in default",
-        )
-        .at(tref.to_string()),
-        Some(_) => RkError::of(
-            ErrorCode::TemplateNotFound,
-            format!("the `--template {tref}` path is not applied yet"),
-            "local-path templates land with the 0.4 template work; omit --template to use \
-             the built-in default for now",
-        )
-        .at(tref.to_string()),
-        None => RkError::of(
-            ErrorCode::UsageError,
-            format!("`{tref}` is not a valid template reference"),
-            "use gh:owner/repo[@ref], @scope/name, or a local path",
-        )
-        .at(tref.to_string()),
-    }
-}
-
 /// Resolve whether to git-init: `--no-git` off, `--git` on, else default (on for
 /// non-minimal, off for minimal — DESIGN §2 "default on for non-minimal").
 fn resolve_git(args: &NewArgs) -> bool {
@@ -681,29 +690,6 @@ mod tests {
         assert!(!resolve_git(&off));
     }
 
-    #[test]
-    fn template_ref_routes_to_the_right_boundary() {
-        // A remote ref is classified remote (TemplateNotFound, not a usage error).
-        assert_eq!(
-            template_not_implemented("gh:user/repo").code,
-            ErrorCode::TemplateNotFound
-        );
-        assert_eq!(
-            template_not_implemented("@scope/name").code,
-            ErrorCode::TemplateNotFound
-        );
-        // A local path is a not-yet-applied template (also TemplateNotFound).
-        assert_eq!(
-            template_not_implemented("./local/dir").code,
-            ErrorCode::TemplateNotFound
-        );
-        // A clearly-malformed ref is a usage error.
-        assert_eq!(
-            template_not_implemented("gh:owner").code,
-            ErrorCode::UsageError
-        );
-    }
-
     fn base_args() -> NewArgs {
         NewArgs {
             name: None,
@@ -713,6 +699,7 @@ mod tests {
             minimal: false,
             yes: false,
             update: false,
+            dry_run: false,
             sdk_dir: None,
             git: false,
             no_git: false,

@@ -283,11 +283,11 @@ fn device_kind_still_scaffolds_m4l() {
     assert!(proj.join("src/my-device.maxpat").is_file());
 }
 
-/// A remote `--template` ref routes to the frozen template boundary (RK0402, exit 3,
-/// "not implemented yet") — it must NOT silently fall back to the built-in default. The
-/// TEMPLATES agent fills the fetch; the foundation freezes the classification.
+/// A remote `--template gh:…` under `--no-input` (no `--yes`) REFUSES at the §5.7
+/// confirmation gate (RK0403, exit 3) — it must never silently fetch/build, and must never
+/// fall back to the built-in default.
 #[test]
-fn remote_template_routes_to_boundary() {
+fn remote_template_no_input_refuses() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
 
@@ -296,9 +296,8 @@ fn remote_template_routes_to_boundary() {
         .assert()
         .failure()
         .code(3)
-        .stderr(predicate::str::contains("remote template"))
-        .stderr(predicate::str::contains("not implemented yet"))
-        .stderr(predicate::str::contains("RK0402"));
+        .stderr(predicate::str::contains("--no-input forbids the prompt"))
+        .stderr(predicate::str::contains("RK0403"));
 }
 
 /// A malformed `--template` ref is a usage error (exit 2), caught by the frozen classifier.
