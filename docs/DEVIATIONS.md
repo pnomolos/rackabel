@@ -113,6 +113,66 @@ can be added without changing the build-hash contract.
 
 ---
 
+## 0.2 pack
+
+### D-11. `pack` emits `.ablx` only — the Arclight `.zip` layout is dropped (DESIGN §4.7 / SPEC B §4)
+
+The Arclight `pack-extension.js` produces `releases/<slug>-v<version>[-os-arch].zip`
+(a User-Library-shaped zip), while the official `extensions-cli package` produces
+`<name-ws→dash>-<version>.ablx` (the distribution container). DESIGN §4.7 settles the
+format on `.ablx`, so rackabel's `pack` produces **only** `.ablx`, never the Arclight
+`.zip`:
+
+- **pure-JS** (no native deps, default) ⇒ shell out to `extensions-cli package`
+  (DESIGN §4.7: thin wrapper, no drift), surfacing the exact official
+  `<name>-<version>.ablx` filename and passing `-o` to a chosen path.
+- **native-dep** extensions, **and** `--no-official-cli` ⇒ rackabel's own packer,
+  producing one `<slug>-v<version>-<os>-<arch>.ablx` per declared target. The Arclight
+  *naming* (`<slug>-v<version>-<os>-<arch>`) is kept; the *extension* is `.ablx`, not
+  `.zip`. The default output directory for the native set is `releases/` (the Arclight
+  convention) since there are multiple files; the pure-JS single file defaults to the
+  extension dir (the official convention). `-o` overrides: a verbatim path for the
+  single pure-JS file, an output **directory** for the native set.
+
+The native `.ablx` member layout is `manifest.json` + the manifest `entry` +
+`dist/<extra_dist_files>` + the collected native `node_modules/` (prebuilds slimmed to
+the target suffix) — the official packager bundles **no** node_modules (SPEC C §0), so
+this is the only path that yields a working native bundle.
+
+### D-12. The lidal `lidal.openEditor` sentinel is dropped (SPEC B §4)
+
+`pack-extension.js`'s pre-flight has a lidal-specific guard: if `slug === "lidal"`, the
+bundle text must contain `lidal.openEditor` or it errors (a wrong-bundle hack). This is
+project-specific and does not generalize, so rackabel drops it. The portable pre-flight
+correctness gates that *do* generalize (bundle exists, `node --check` parses it — both
+already enforced by the shared `build` step that `pack` runs first) are kept; the 10KB
+floor stays a build-time warning (see D-8).
+
+### D-13. `pack` runs an inline ship-validation subset, not `commands::validate::run` (DESIGN §2 pack)
+
+DESIGN §2 requires `pack` to auto-run `validate` and fail with exit 4 before producing
+a distributable. In 0.2 there is no shared, callable validation **service** in the
+frozen API surface — the logic lives in `commands/validate.rs`, owned by another agent
+and still a foundation stub. To keep pack's "never ship a failing artifact" gate real
+*now* without reaching into another owner's file, `pack` runs the validation subset it
+needs inline: manifest completeness (name + author non-empty → `RK4001`) and
+`minimumApiVersion ≤` the SDK's newest supported version (`RK4002`, the only on-disk
+source per SPEC A §2). When the validate-owner exposes a callable gate, `pack` should
+delegate to it for the full checklist (version-bump, identifier drift, native `.node`
+presence). No spec behavior is dropped — only a narrower subset runs until the shared
+gate exists.
+
+### D-14. `zip` crate added for the own packer (SPEC C §2)
+
+SPEC C §2 anticipates a Rust zip crate ("e.g. `zip`") for the own packer. The
+foundation `Cargo.toml` did not yet include one, so the pack branch adds
+`zip = { version = "2", default-features = false, features = ["deflate"] }` (the
+flate2-backed deflate path, matching the existing `flate2`/`tar` toolkit deps). Byte
+identity with `archiver` is explicitly **not** a contract (SPEC A §1.4 closing note);
+the member layout is. The integrator should keep this dependency line.
+
+---
+
 ## Deferred (to be recorded by the owning command branch when it lands)
 
 These are flagged in the specs as likely deviations but belong to a command body the
@@ -122,10 +182,8 @@ foundation only stubs; the owning branch records the final decision here.
   foundation ships `fix` as an `RK0304` stub with a plain-English help line. If full
   `pnpm approve-builds`+`rebuild` automation slips past 0.2, the deploy-owner records
   it here.
-- **pack dual-format `.ablx` vs `.zip`** (DESIGN §4.7 / SPEC B §4). The pack-owner
-  records the reconciliation between the official `<name>-<version>.ablx` and the
-  Arclight `<slug>-v<version>[-os-arch].zip` layouts, and the dropped/ generalized
-  lidal `lidal.openEditor` sentinel.
+- ~~**pack dual-format `.ablx` vs `.zip`**~~ — resolved by the pack branch; see D-11,
+  D-12 above.
 - **Developer Mode detection is behavioral/unverified** (DESIGN §9.2 / SPEC B §6).
   Dev Mode is not statically readable; the doctor-owner records the inferred
   (running-Live + host-child presence) approach when `doctor` lands.

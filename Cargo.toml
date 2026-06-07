@@ -26,6 +26,7 @@ semver = "1"
 which = "7"
 plist = "1"
 home = "0.5"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 assert_cmd = "2"

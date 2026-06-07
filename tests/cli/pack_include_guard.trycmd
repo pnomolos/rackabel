@@ -1,0 +1,26 @@
+An escaping `--include` is rejected with a rackabel three-part frame (RK4004) BEFORE
+any build runs — the include guard is a pre-flight validation gate (DESIGN §2 pack).
+The frame is written to stderr; trycmd matches it here, and the exit code is the
+validation code 4.
+
+```
+$ rackabel pack -i ../outside.txt
+? 4
+error: an --include path must stay inside the extension directory [RK4004]
+  --> --include ../outside.txt
+  help: remove the `..` segments — only files within the project can be bundled
+(run `rackabel explain RK4004` for details)
+
+```
+
+An absolute `--include` is likewise a validation failure (exit 4).
+
+```
+$ rackabel pack --include /tmp/escape.txt
+? 4
+error: an --include path must be relative to the extension directory [RK4004]
+  --> --include /tmp/escape.txt
+  help: use a path relative to the project root, e.g. `-i assets/icon.png`
+(run `rackabel explain RK4004` for details)
+
+```

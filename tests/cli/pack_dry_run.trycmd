@@ -1,0 +1,24 @@
+`pack --dry-run` on a pure-JS extension plans the official packer and surfaces the
+official `<name>-<version>.ablx` filename, mutating nothing (DESIGN §2 pack, §4.7).
+
+```
+$ rackabel pack --dry-run
+planned pack steps (nothing was changed):
+  - production build (--release)
+  - validate (manifest complete, minimumApiVersion <= host)
+  - packer: official extensions-cli (pure-JS)
+  - write [..]Clip-Renamer-0.1.0.ablx
+
+```
+
+`--no-official-cli --dry-run` switches to rackabel's own packer.
+
+```
+$ rackabel pack --no-official-cli --dry-run
+planned pack steps (nothing was changed):
+  - production build (--release)
+  - validate (manifest complete, minimumApiVersion <= host)
+  - packer: rackabel (--no-official-cli)
+  - write [..].ablx [[..]]
+
+```
