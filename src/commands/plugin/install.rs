@@ -1,40 +1,20 @@
-//! `rackabel plugin install OWNER/REPO|<path|tarball>` (DESIGN §5.4) — STUB.
+//! `rackabel plugin install OWNER/REPO|<path|tarball>` (DESIGN §5.4).
 //!
-//! OWNED BY THE PLUGIN-MGMT AGENT. The foundation freezes the surface this fills:
-//!   - source classification via [`crate::plugin::source::PluginSource`] (gh repo vs
-//!     sideloaded path/tarball);
-//!   - the §5.7 remote-install confirmation (print what will be fetched/run; `--yes` to
-//!     script; `--no-input` fails with `RK0403` instead of prompting);
-//!   - pin + verify via [`crate::plugin::sha256`] / [`crate::plugin::git`]
-//!     (`RK4007 PinMismatch` on mismatch; `--force` announces a deliberate update);
-//!   - record the result in [`crate::plugin::lock::LockFile`] (including the inert 0.5
-//!     `rackabel-plugin.toml` presence + hook list) and symlink into the managed bin.
-//!
-//! The body below classifies the source (the frozen, tested part) and then returns the
-//! not-implemented frame so the tree builds and the boundary is explicit.
+//! OWNED BY THE PLUGIN-MGMT AGENT. Thin entry point: thread `--yes` through to the store
+//! engine and run it. The engine ([`crate::plugin::store`]) does the work — source
+//! classification, the §5.7 announce + remote-consent gate, fetch/clone/sideload into the
+//! per-name store, the sha256/commit pin + `RK4007` mismatch enforcement, the managed-bin
+//! symlink, and the `plugins.lock` record (including the inert 0.5 `rackabel-plugin.toml`
+//! presence + hook list). `--json` emits the machine-readable install result (§7).
 
 use crate::cli::PluginInstallArgs;
 use crate::context::Ctx;
-use crate::error::{CmdResult, ErrorCode, RkError};
-use crate::plugin::source::PluginSource;
+use crate::error::CmdResult;
+use crate::plugin::store;
 
-pub fn run(args: &PluginInstallArgs, _ctx: &Ctx) -> CmdResult<()> {
-    let source = PluginSource::parse(&args.source).ok_or_else(|| {
-        RkError::of(
-            ErrorCode::UsageError,
-            format!("`{}` is not a valid install source", args.source),
-            "use OWNER/REPO, a local path, or a .tgz tarball",
-        )
-        .at(args.source.clone())
-    })?;
-
-    Err(RkError::of(
-        ErrorCode::PluginNotFound,
-        format!(
-            "plugin install for `{}` is not implemented yet",
-            source.display()
-        ),
-        "plugin install (release-asset/clone+run, sideload, sha256/commit pinning) lands \
-         with the 0.4 plugin-management work; the model + seams are in place",
-    ))
+pub fn run(args: &PluginInstallArgs, ctx: &Ctx) -> CmdResult<()> {
+    // `--yes` is carried on the install args; thread it to the engine's consent gate
+    // without widening the shared, frozen `Ctx` model just for this one flag.
+    store::set_yes(args.yes);
+    store::install(args, ctx)
 }

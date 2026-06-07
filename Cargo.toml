@@ -32,6 +32,16 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 # sha256 pinning for `plugin install` (plugins.lock), §5.4. A pure-Rust hash with no
 # system/openssl dependency — the install/verify path hashes downloaded assets/tarballs.
 sha2 = "0.10"
+# `plugin install <tarball>` sideload: a sideloaded `.tgz`/`.tar.gz` is unpacked into the
+# managed store. Pure-Rust gzip (flate2/miniz_oxide) + tar, no system libz/openssl (§5.4).
+flate2 = "1"
+tar = "0.4"
+# `plugin install OWNER/REPO` (release-asset fetch) + `plugin search` (the GitHub topic
+# query). ureq is a small blocking HTTP client; rustls keeps it pure-Rust (no openssl).
+# Tests stub the API/asset host via the RACKABEL_GITHUB_API / RACKABEL_GITHUB_DL seams, so
+# the network is never touched in the suite (§5.4, D-85: the real fetch is exercised
+# manually; the seams + the clean RK0404 NoNetwork frame are the contract).
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 
 # Daemon mechanics (SPEC D §5): setsid/setpgid (pre_exec), killpg, and kill(pid, None)
 # liveness probing. std exposes none of these portably, so the dev-host daemon/host/ipc

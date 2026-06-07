@@ -1114,3 +1114,75 @@ inaccurate). `new --update` short-circuits before kind resolution, reads the fro
 `.rackabel-template` lockfile, and returns "nothing to update" (`RK0402`) when absent or the
 not-implemented merge frame when present. The TEMPLATES agent fills the fetch/render/3-way
 merge; the foundation freezes the source classification + the lockfile models.
+
+## 0.4 plugin-management (install / list / enable / disable / search + plugins.lock)
+
+### D-87. A declined PLUGIN install reuses RK0403 (environment, exit 3), not a usage RK01xx (DESIGN §5.4/§5.7, §7)
+
+§7 says a prompt refused under `--no-input` exits `2` for a usage/missing-answer prompt and
+`3` for an environment prompt. The remote-install consent prompt ("fetch + run unreviewed
+third-party code?") is treated as an **environment** decision and reuses `RK0403
+TemplateFetchDeclined` (exit 3) — the SAME code the foundation froze for a declined remote
+TEMPLATE fetch, whose `explain` prose already names `plugin install` explicitly. Rationale:
+(a) a declined install is the same *class* of event as a declined template fetch (consent to
+run remote code) and should `explain` identically; (b) it is not a malformed invocation (the
+command is well-formed — the user simply did not consent), so the usage class (2) is the
+wrong remedy. `--yes` is the scripted consent; `--no-input` (or a non-TTY with no `--yes`,
+or `--json` with no `--yes`) refuses with `RK0403` and fetches NOTHING. A sideload
+(`<path>`/`<tarball>`) is local code the user already has and is NOT gated behind this prompt
+— it still announces what it will do, and the bytes are still sha256-pinned.
+
+### D-88. A plain tier-2 plugin installs ENABLED; a hook plugin installs DISABLED (DESIGN §5.4 vs §5.7)
+
+The foundation's `plugins.lock` `enabled` flag defaults `false` (documented as the 0.5 hook
+consent gate). The 0.4 milestone task additionally makes the flag **gate dispatch of the
+managed copy** (a disabled managed plugin is skipped in the bin search with a one-line note).
+These two intents are reconciled at install time: a **plain** tier-2 plugin (NO
+`rackabel-plugin.toml`) installs `enabled = true` so it is immediately usable (the musician
+happy path — installing it then having `rackabel <foo>` say "disabled" would be baffling); a
+**hook** plugin (carries a manifest) installs `enabled = false` so hooks never run under a
+default-on flag — enabling is the explicit 0.5 consent (§5.7). A reinstall preserves the
+prior flag unless the code changed; if it changed, the §5.7 rule applies (a hook plugin is
+forced back to disabled — new code never runs under old consent; a plain plugin stays usable).
+
+### D-89. Dispatch gating is a one-line hook in the foundation-owned bare-external dispatch (DESIGN §5.4)
+
+"A disabled managed plugin is skipped in the bin search" requires a check at the dispatch
+site. The pure resolver (`plugin::resolve`, foundation-owned) intentionally does NOT read the
+lockfile, so the enabled-state gate lives in `plugin::store::is_managed_disabled` and is
+consulted by `commands::plugin::external::run` (the bare `rackabel <foo>` path): a disabled
+managed copy is skipped with a note, falling back to a `$PATH` `rackabel-<foo>` if one exists,
+else `RK0401` ("installed but disabled"). `plugin run` (the §5.6 escape hatch) deliberately
+IGNORES the flag and always reaches the plugin. `plugin which` is left to the foundation as-is
+(it reports resolution, not enabled-state). The SAME dispatch site also calls
+`store::verify_managed` (the §5.7 tamper check) before running a managed copy: a modified
+store file fails its lockfile sha256 pin with `RK4007` (exit 4) before any code runs; an
+unmanaged `$PATH` plugin has no pin and is run as-is. **Integrator note:** `external.rs` is
+the only foundation-owned command file this agent edits (two added calls into this agent's
+`store.rs`: `is_managed_disabled` and `verify_managed`); both gate functions live in
+`store.rs`.
+
+### D-90. New seam `RACKABEL_GITHUB_DL` + HTTP/tar/gzip deps for the install/search bodies (DESIGN §5.4, D-85)
+
+D-85 deferred the real network fetch and added no HTTP client in the foundation. This
+milestone implements it: a small blocking HTTP client (`ureq`, rustls — pure-Rust, no
+openssl) issues the GitHub `search/repositories` query (`plugin search`) and the
+`releases/latest` + release-asset download (`plugin install OWNER/REPO`), and pure-Rust
+`flate2`+`tar` unpack a sideloaded `.tgz`. A SECOND seam joins the foundation's
+`RACKABEL_GITHUB_API` (which lists asset URLs): `RACKABEL_GITHUB_DL` rewrites the
+release-asset *download* host so the asset fetch hits a local stub server in tests (the API
+response advertises a github.com URL; the seam swaps only the host). Tests stub both seams
+with a throwaway in-process `TcpListener`, so the suite NEVER touches the network; the real
+fetch is exercised manually. Every network failure (transport, 403/429 rate limit, 5xx) maps
+to the clean `RK0404 NoNetwork` frame; a 404 on `OWNER/REPO` is `RK0401 PluginNotFound`.
+
+### D-91. `OWNER/REPO` clone-with-no-build is a clear frame, not a silent success (DESIGN §5.4)
+
+For `plugin install OWNER/REPO`, 0.4 implements the **release-asset** path (preferred:
+`rackabel-<name>-<os>-<arch>`, sha256-pinned) and a **clone** path that pins the commit and
+installs a `rackabel-<name>` already committed at the repo root. 0.4 does NOT invent a build
+toolchain: a clone with no prebuilt executable and no build rackabel recognizes returns a
+clear `RK0401` frame (naming the cloned commit) pointing the user at publishing a release
+asset or sideloading a locally-built executable — never a silent "installed nothing". The
+asset path is the intended production route; the full auto-build of an arbitrary repo is left
+for a later milestone.
