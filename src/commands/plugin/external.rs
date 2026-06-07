@@ -8,11 +8,12 @@
 use std::ffi::OsString;
 use std::process::Command;
 
+use crate::cli::RESERVED_NAMESPACE;
 use crate::context::Ctx;
 use crate::error::{CmdResult, ErrorCode, RkError};
+use crate::plugin::lock::LockFile;
 use crate::plugin::resolve::{self, Resolution};
-use crate::plugin::{env_contract, plugins_bin_dir};
-use crate::ui;
+use crate::plugin::{env_contract, warn_state};
 
 /// Run an external `rackabel-<foo>` subcommand. `argv[0]` is the `<foo>` token; the rest
 /// are forwarded verbatim. The process exit code is propagated by exiting with it (so a
@@ -38,7 +39,7 @@ pub fn run(argv: &[OsString], ctx: &Ctx) -> CmdResult<()> {
         }
         Resolution::Managed { path, also_on_path } => {
             if *also_on_path {
-                warn_both_locations(&name, ctx);
+                warn_state::warn_both_locations_once(ctx, &name);
             }
             path.clone()
         }
@@ -79,7 +80,17 @@ pub fn run(argv: &[OsString], ctx: &Ctx) -> CmdResult<()> {
 }
 
 /// The `RK0401` "no such plugin/command" frame for a missing external subcommand.
-fn unknown_command(name: &str, _ctx: &Ctx) -> RkError {
+///
+/// The `help:` line carries an optional did-you-mean BLOCK listing the closest built-in
+/// and/or installed-plugin candidates (§5.1). It is a help line LISTING candidates, never
+/// an auto-correct: rackabel never silently runs a different command than the user typed.
+fn unknown_command(name: &str, ctx: &Ctx) -> RkError {
+    let base = "run `rackabel --help` for built-ins, `rackabel plugin list` for installed \
+                plugins, or `rackabel plugin install OWNER/REPO` to add one";
+    let help = match did_you_mean(name, ctx) {
+        Some(candidates) => format!("did you mean: {candidates}?\n{base}"),
+        None => base.to_string(),
+    };
     RkError::of(
         ErrorCode::PluginNotFound,
         if name.is_empty() {
@@ -87,23 +98,74 @@ fn unknown_command(name: &str, _ctx: &Ctx) -> RkError {
         } else {
             format!("unknown command `{name}` (no built-in and no plugin by that name)")
         },
-        "run `rackabel --help` for built-ins, `rackabel plugin list` for installed plugins, \
-         or `rackabel plugin install OWNER/REPO` to add one",
+        help,
     )
 }
 
-/// The one-time both-locations warning (§5.1/§5.6 — cargo-#6507 proactive surfacing).
-fn warn_both_locations(name: &str, ctx: &Ctx) {
-    if !ctx.echo_on() {
-        return;
+/// A comma-joined list of the closest built-in + installed-plugin candidates for `name`,
+/// or `None` when nothing is close enough. Candidates are within edit distance 2 (and at
+/// most half the typed token's length), so an obvious typo (`biuld` → `build`) surfaces a
+/// suggestion while a genuinely novel token gets none. Never auto-corrects.
+fn did_you_mean(name: &str, ctx: &Ctx) -> Option<String> {
+    if name.is_empty() {
+        return None;
     }
-    let managed = plugins_bin_dir(ctx).display().to_string();
-    ui::frame::emit(
-        ui::frame::Symbol::Warn,
-        &format!(
-            "rackabel-{name} found in both {managed} and $PATH; using the managed one \
-             (see `rackabel plugin which {name}`)"
-        ),
-        ctx,
-    );
+    // Candidate pool: every reserved built-in + every installed plugin name. A lockfile
+    // read failure is non-fatal here — a missing suggestion never blocks the real error.
+    let mut pool: Vec<String> = RESERVED_NAMESPACE.iter().map(|s| s.to_string()).collect();
+    if let Ok(lock) = LockFile::load(ctx) {
+        pool.extend(lock.plugins.iter().map(|p| p.name.clone()));
+    }
+
+    let threshold = (name.chars().count() / 2).clamp(1, 2);
+    let mut hits: Vec<(usize, String)> = pool
+        .into_iter()
+        .filter(|c| c != name)
+        .filter_map(|c| {
+            let d = edit_distance(name, &c);
+            (d <= threshold).then_some((d, c))
+        })
+        .collect();
+    if hits.is_empty() {
+        return None;
+    }
+    // Closest first, then alphabetical for determinism; dedup; cap at three.
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    hits.dedup_by(|a, b| a.1 == b.1);
+    let list: Vec<String> = hits
+        .into_iter()
+        .take(3)
+        .map(|(_, c)| format!("`{c}`"))
+        .collect();
+    Some(list.join(", "))
+}
+
+/// Levenshtein edit distance between two tokens (small, allocation-light DP over chars).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for (i, &ca) in a.iter().enumerate() {
+        cur[0] = i + 1;
+        for (j, &cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j + 1] + 1).min(cur[j] + 1).min(prev[j] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_distance_basics() {
+        assert_eq!(edit_distance("build", "build"), 0);
+        assert_eq!(edit_distance("biuld", "build"), 2); // transposition = 2 subs
+        assert_eq!(edit_distance("buld", "build"), 1); // one insertion
+        assert_eq!(edit_distance("", "abc"), 3);
+    }
 }

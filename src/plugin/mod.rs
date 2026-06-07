@@ -23,6 +23,7 @@ pub mod resolve;
 pub mod sha256;
 pub mod source;
 pub mod template;
+pub mod warn_state;
 
 use std::path::PathBuf;
 

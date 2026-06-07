@@ -98,6 +98,17 @@ pub fn emit(sym: Symbol, message: &str, ctx: &Ctx) {
     println!("{} {message}", sym.painted(ctx.color));
 }
 
+/// Emit a `[!] <message>` warning to STDERR (color-aware off the error stream's mode).
+///
+/// Unlike [`emit`], this goes to stderr so it never pollutes a downstream consumer's
+/// stdout — used for the §5.1 both-locations plugin warning, which must not corrupt a
+/// `plugin run`-ed plugin's own stdout when piped. Callers gate on `ctx.echo_on()`.
+pub fn ewarn(message: &str, ctx: &Ctx) {
+    let mut out = std::io::stderr().lock();
+    let glyph = Symbol::Warn.painted(ctx.color_err);
+    let _ = writeln!(out, "{glyph} {message}");
+}
+
 /// Emit an indented `help:` continuation under a status line (doctor remedies).
 pub fn note(message: &str, ctx: &Ctx) {
     let label = Style::Heading.paint("help:", ctx.color);

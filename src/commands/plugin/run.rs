@@ -12,8 +12,7 @@ use crate::cli::PluginRunArgs;
 use crate::context::Ctx;
 use crate::error::{CmdResult, ErrorCode, RkError};
 use crate::plugin::resolve::{self};
-use crate::plugin::{env_contract, plugins_bin_dir};
-use crate::ui;
+use crate::plugin::{env_contract, warn_state};
 
 pub fn run(args: &PluginRunArgs, ctx: &Ctx) -> CmdResult<()> {
     let name = &args.name;
@@ -26,7 +25,7 @@ pub fn run(args: &PluginRunArgs, ctx: &Ctx) -> CmdResult<()> {
     let exe = match r.plugin_path() {
         Some(p) => {
             if r.both_locations() {
-                warn_both_locations(name, ctx);
+                warn_state::warn_both_locations_once(ctx, name);
             }
             // For a built-in-shadowed plugin, plugin_path returns the shadowed plugin —
             // exactly what the escape hatch is for.
@@ -66,19 +65,4 @@ pub fn run(args: &PluginRunArgs, ctx: &Ctx) -> CmdResult<()> {
     } else {
         std::process::exit(status.code().unwrap_or(1));
     }
-}
-
-fn warn_both_locations(name: &str, ctx: &Ctx) {
-    if !ctx.echo_on() {
-        return;
-    }
-    let managed = plugins_bin_dir(ctx).display().to_string();
-    ui::frame::emit(
-        ui::frame::Symbol::Warn,
-        &format!(
-            "rackabel-{name} found in both {managed} and $PATH; using the managed one \
-             (see `rackabel plugin which {name}`)"
-        ),
-        ctx,
-    );
 }
