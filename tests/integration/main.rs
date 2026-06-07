@@ -27,6 +27,10 @@ mod dev_test;
 #[cfg(unix)]
 mod dev_watch;
 mod doctor;
+// Lifecycle hooks: the pre_deploy veto end-to-end + the env/payload contract (HOOK-ENGINE).
+// Unix-only (fixture hooks are shell scripts with exec bits).
+#[cfg(unix)]
+mod hooks;
 mod new;
 mod pack;
 // Tier-1 template rendering (`new --template`) + `new --update` 3-way merge (milestone

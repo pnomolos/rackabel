@@ -1340,3 +1340,44 @@ engine-level failure (a command path that does not exist) is a framed `RkError`,
 an in-contract `HookOutcome` (informational-skip / veto / doctor-row / template-choice). The
 BODY is a stub returning `RK1309` until the 0.5 feature agent lands the subprocess/timeout
 machinery; the signature is frozen now so callers compile against it.
+
+### D-102. The hook engine BODY lands; subprocess + timeout/SIGKILL machinery is Unix-only this milestone (DESIGN §5.3/§5.7, milestone 0.5)
+
+D-101 froze the signature with an `RK1309` stub. This milestone fills the body. The §5.3
+execution contract is implemented EXACTLY: the §5.2 env map (`env_contract::build`) PLUS
+`RACKABEL_HOOK_API=HOOK_API` on the child; exactly one JSON payload written to stdin then
+stdin CLOSED (EOF framing — a read-to-EOF hook terminates naturally, a blocking one hits the
+timeout); a wall-clock timeout (`ResolvedHook::timeout_ms`, default 30s, `[hooks.timeouts]`
+override in ms) enforced by polling `try_wait` against a deadline, then SIGTERM to the child's
+PROCESS GROUP and SIGKILL after a 5s grace, then reap — a timeout is treated EXACTLY like a
+nonzero exit per kind. The child is placed in its own process group via a `pre_exec`
+`setpgid(0,0)` (mirroring the dev host) so `killpg` reaps a hung hook's whole tree with NO
+orphan (asserted by a `ps`-based test). **Deviation:** that signalling is `#[cfg(unix)]`. On a
+non-Unix build `exec` returns a framed `RK1309` ("hooks not supported on this platform yet"),
+matching the dev host's Unix-only posture (§9.3) rather than running a hook WITHOUT the
+bounded-DoS timeout guarantee. Cross-platform hook execution is deferred, not faked.
+
+### D-103. A `pre_deploy` hook whose command cannot be SPAWNED aborts the deploy (it is a refusal, not a skip) (DESIGN §5.3/§5.7)
+
+§5.3 says a `pre_deploy` nonzero/timeout aborts the deploy. It is silent on a `pre_deploy`
+whose command path does not exist / is not executable (a spawn failure, distinct from a hook
+that ran and exited nonzero). **Decision:** a spawn failure of a `pre_deploy` hook ALSO aborts
+the deploy (framed `RK1310`), because a deploy GATE the user enabled that cannot even run is a
+refusal — silently skipping it would deploy past a notarize/lint check the user explicitly
+asked for, the exact "enabling is the consent" violation §5.7 guards against. The informational
+hooks (`post_build`/`on_reload`) take the opposite branch by design: a spawn failure there is
+logged + skipped (never fatal), because those phases can never abort. Both branches live in
+`hooks::lifecycle`; the engine itself returns the spawn failure as a framed `RkError` and lets
+each phase apply its policy.
+
+### D-104. on_reload fires per-reloaded-extension with the reload's OVERALL ok/reload_ms (DESIGN §5.3)
+
+§5.3's `on_reload` payload is `{project_dir, manifest_toml, name, reload_ms, ok}`. The dev watch
+chain reloads a SET of affected extensions in one `reload` IPC whose `ReloadResult` carries an
+overall `ok` + `reload_ms` (the host kill+respawn is whole-host, SPEC H §2 — there is no
+per-extension reload timing). **Decision:** `on_reload` fires once per reloaded extension, each
+with its own `name`/`project_dir`/`manifest_toml` but sharing that one reload's `ok`/`reload_ms`.
+This is faithful to the host model (a single respawn served them all) and keeps the per-extension
+`name` a hook can key on. A reload that errored at the IPC layer (never completed) fires NO
+`on_reload`. `post_build` is NOT fired inside the watch chain when build-if-stale SKIPS esbuild
+(no build ran ⇒ no post_build) — it fires only on an actual build, with `bundle_path` present.

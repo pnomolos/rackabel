@@ -259,7 +259,59 @@ pub fn build_extension(
         typechecked: typecheck_on,
     };
     report_success(&outcome, ctx);
+
+    // Fire the post_build lifecycle hooks (DESIGN §5.3). Informational only: a failing
+    // hook is logged + skipped and NEVER aborts the build (a broken third-party hook can't
+    // brick `build`). This runs inside the dev watch chain too (where `ctx.quiet` owns the
+    // §6.2 chain line) — the engine routes hook logs to stderr so the chain line stays clean.
+    fire_post_build_hooks(project, &outcome, opts, ctx);
+
     Ok(outcome)
+}
+
+/// Resolve + run the `post_build` hooks for a just-built project (§5.3). Best-effort: any
+/// failure to assemble the payload (an unreadable/unparseable manifest) silently skips the
+/// hooks rather than turning a green build into an error — the build already succeeded.
+fn fire_post_build_hooks(
+    project: &Project,
+    outcome: &BuildOutcome,
+    opts: &BuildOptions,
+    ctx: &Ctx,
+) {
+    use crate::hooks::lifecycle;
+    use crate::hooks::payload::{HookPayload, PostBuildPayload, manifest_toml_object};
+
+    let manifest_path = project.root.join(crate::manifest::MANIFEST_NAME);
+    let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+        return;
+    };
+    let Ok(manifest_toml) = manifest_toml_object(&text) else {
+        return;
+    };
+    // The project-kind string for the payload (§5.3). esbuild::build_extension only runs
+    // for an Extension project, so this is "extension"; computed from kind() to stay honest
+    // if the dispatch ever broadens.
+    let kind = match project.kind() {
+        Ok(crate::manifest::Kind::Device) => "device",
+        Ok(crate::manifest::Kind::Workspace) => "workspace",
+        _ => "extension",
+    }
+    .to_string();
+    // bundle_path is ABSENT for a skipped build (§5.3 unset-not-empty); present otherwise.
+    let bundle_path = if outcome.skipped {
+        None
+    } else {
+        Some(outcome.entry.display().to_string())
+    };
+    let payload = HookPayload::PostBuild(PostBuildPayload {
+        project_dir: project.root.display().to_string(),
+        manifest_toml,
+        bundle_path,
+        build_hash: outcome.hash.clone(),
+        kind,
+        release: opts.release,
+    });
+    lifecycle::post_build(ctx, project, &payload);
 }
 
 // --- node-driven steps ------------------------------------------------------
