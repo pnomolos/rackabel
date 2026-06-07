@@ -43,16 +43,27 @@ fn short_title(code: ErrorCode) -> &'static str {
         ErrorCode::NativeDepNotCompiled => "A native dependency is not compiled",
         ErrorCode::NoNodeRuntime => "No usable node runtime for build",
         ErrorCode::DeveloperModeOff => "Developer Mode is off",
+        ErrorCode::DaemonStartFailed => "The dev host daemon did not start",
+        ErrorCode::ProtocolMismatch => "Dev host protocol version mismatch",
+        ErrorCode::NoDaemon => "No dev host is running",
+        ErrorCode::HostCrashLooping => "The Extension Host keeps crashing",
+        ErrorCode::RegistryLocked => "Could not lock the registry",
+        ErrorCode::NameCollision => "A registry name collides with a reserved verb or entry",
         ErrorCode::BuildFailed => "esbuild bundle failed",
         ErrorCode::TypecheckFailed => "tsc --noEmit typecheck failed",
         ErrorCode::BundleSanity => "Bundle sanity check failed",
         ErrorCode::DeployCopyFailed => "Deploy copy failed",
         ErrorCode::PackFailed => "Pack failed",
+        ErrorCode::ReloadActivateFailed => "An extension threw in activate() on reload",
+        ErrorCode::HostLaunchFailed => "The Extension Host failed to launch",
         ErrorCode::ManifestIncomplete => "Manifest is incomplete",
         ErrorCode::ApiVersionTooHigh => "minimumApiVersion exceeds the host's apiVersion",
         ErrorCode::VersionNotBumped => "Version not bumped vs the last packed version",
         ErrorCode::IncludeInvalid => "An --include path is invalid",
         ErrorCode::IdentifierDrift => "A stable command identifier changed",
+        ErrorCode::SkippedIncompatible => {
+            "An extension was skipped as host-incompatible (--strict)"
+        }
     }
 }
 
@@ -233,6 +244,93 @@ fn long_form(code: ErrorCode) -> &'static str {
                - turn on Live → Settings → Extensions → Developer Mode, then rerun,\n\
                  or just run `rackabel dev` and toggle it when prompted."
         }
+        ErrorCode::DaemonStartFailed => {
+            "The managed dev host daemon did not come up within the start window.\n\
+             \n\
+             `rackabel dev`/`dev start` re-exec a detached daemon that owns the\n\
+             Extension Host, then wait a few seconds for its control socket and a\n\
+             health ping. If that never happens, the daemon failed to launch (a bad\n\
+             Live/host path, a node that won't start, or the host couldn't connect to\n\
+             Live's single host slot).\n\
+             \n\
+             Note: the managed dev host is macOS/Unix-only for now; on Windows this\n\
+             code is returned immediately.\n\
+             \n\
+             To fix:\n\
+               - run `rackabel doctor` to confirm Live, the host module, and Developer\n\
+                 Mode are all ready, then retry.\n\
+               - run with --raw to see the daemon's startup output.\n\
+               - if a non-rackabel Extension Host is already connected to Live, stop it\n\
+                 first (Live accepts only one host connection at a time)."
+        }
+        ErrorCode::ProtocolMismatch => {
+            "The running dev host daemon speaks a different control-socket protocol\n\
+             than this rackabel build.\n\
+             \n\
+             The daemon survives terminal close and upgrades; if you update rackabel\n\
+             while an older daemon is still running, their socket protocol versions can\n\
+             disagree. rackabel refuses to talk a protocol it doesn't understand rather\n\
+             than risk a corrupt command.\n\
+             \n\
+             To fix:\n\
+               - restart the dev host: `rackabel dev stop && rackabel dev`."
+        }
+        ErrorCode::NoDaemon => {
+            "This command needs a running dev host, and none is up for the resolved\n\
+             Live install.\n\
+             \n\
+             `dev status`, `dev reload`, `dev logs`, and `dev stop` are thin clients of\n\
+             the daemon that owns the Extension Host. (Registry commands — `dev list`,\n\
+             `dev register`, `dev enable`/`disable` — deliberately work WITHOUT a\n\
+             daemon, so you can curate the set while the host is down.)\n\
+             \n\
+             To fix:\n\
+               - start the dev host with `rackabel dev` (or `rackabel dev start`), then\n\
+                 rerun. `dev watch` is the explicit no-auto-start form and reports this\n\
+                 same code when nothing is up."
+        }
+        ErrorCode::HostCrashLooping => {
+            "The Extension Host keeps crashing on startup and rackabel has stopped\n\
+             auto-restarting it.\n\
+             \n\
+             After a bounded number of failed respawns in a short window the daemon\n\
+             marks the host `crash-looping` and waits for you, rather than spinning a\n\
+             doomed process forever (and so CI can detect the condition). The usual\n\
+             cause is an extension that throws during `activate()`, or a bad native\n\
+             dependency.\n\
+             \n\
+             To fix:\n\
+               - read `rackabel dev logs` for the uncaught exception, fix the extension\n\
+                 (or `dev disable <name>` it), then `rackabel dev reload` / `dev start`\n\
+                 to clear the crash-looping state."
+        }
+        ErrorCode::RegistryLocked => {
+            "rackabel could not acquire the registry lock.\n\
+             \n\
+             Writes to ~/.rackabel/registry.toml take a short advisory lock\n\
+             (~/.rackabel/registry.lock) so two rackabel processes can't corrupt it.\n\
+             A timeout means another rackabel is mid-write, or a previous run left a\n\
+             stale lockfile.\n\
+             \n\
+             To fix:\n\
+               - wait a moment and retry; if it persists and no other rackabel is\n\
+                 running, delete ~/.rackabel/registry.lock and retry."
+        }
+        ErrorCode::NameCollision => {
+            "A `register --name` value collides with an existing registry entry or a\n\
+             reserved `dev` verb, and --no-input forbids the interactive rename.\n\
+             \n\
+             Registry names must be unique and must not shadow a `dev` verb\n\
+             (start/stop/status/register/…), because that name is how you address the\n\
+             extension (`dev logs <name>`, `dev --only <name>`). Normally rackabel\n\
+             auto-disambiguates (e.g. `packages-a-foo`); under --no-input it will not\n\
+             silently pick a name for you.\n\
+             \n\
+             To fix:\n\
+               - pass a different, unique `--name` that isn't a dev verb, or\n\
+               - drop --no-input so rackabel can auto-disambiguate and print what it\n\
+                 chose."
+        }
         ErrorCode::BuildFailed => {
             "esbuild failed to bundle the extension.\n\
              \n\
@@ -301,6 +399,35 @@ fn long_form(code: ErrorCode) -> &'static str {
                - `--no-official-cli` forces rackabel's own packer if the official one\n\
                  is the problem."
         }
+        ErrorCode::ReloadActivateFailed => {
+            "A targeted extension threw an exception inside its `activate()` during a\n\
+             reload.\n\
+             \n\
+             The whole-host reload re-initialized, but the named extension's\n\
+             `activate()` raised — so it is not loaded. rackabel maps the failing frame\n\
+             back through the dist sourcemap to your source file:line where it can.\n\
+             This is a build/runtime failure (exit 1): your code, not the machine.\n\
+             \n\
+             To fix:\n\
+               - read the mapped stack in `rackabel dev logs <name>`, fix the throw,\n\
+                 and save — the watch loop rebuilds, redeploys, and reloads. Other\n\
+                 extensions stay loaded; only the failing one is affected."
+        }
+        ErrorCode::HostLaunchFailed => {
+            "The Extension Host process failed to spawn.\n\
+             \n\
+             The daemon launches the host by running Live's bundled node against the\n\
+             ExtensionHostNodeModule.node it found in your Live app. A spawn failure\n\
+             means that node binary or host module could not be executed (a missing or\n\
+             wrong path, or a permissions problem).\n\
+             \n\
+             To fix:\n\
+               - run `rackabel doctor` to confirm the resolved Live, host module, and\n\
+                 bundled node, then retry.\n\
+               - override the paths explicitly with --eh-node / --eh-mod (or the\n\
+                 ABLETON_EH_NODE / ABLETON_EH_MOD environment variables) if detection\n\
+                 picked the wrong ones."
+        }
         ErrorCode::ManifestIncomplete => {
             "A required manifest field is missing or empty after inference.\n\
              \n\
@@ -368,6 +495,23 @@ fn long_form(code: ErrorCode) -> &'static str {
              \n\
              Under `rackabel validate --strict` this rule is fatal once it has\n\
              something to compare."
+        }
+        ErrorCode::SkippedIncompatible => {
+            "An extension was skipped because its minimumApiVersion exceeds the host's\n\
+             apiVersion, and `dev reload --strict` makes any such skip fatal.\n\
+             \n\
+             The daemon pre-filters the registry before launching the host: an\n\
+             extension whose minimumApiVersion is higher than what the host provides is\n\
+             dropped with a `Skipped:` note (one incompatible manifest would otherwise\n\
+             take the WHOLE host down — verified host behavior). Normally a skip is\n\
+             non-fatal (exit 0); `--strict` promotes it to exit 1 so a CI gate can't\n\
+             read 'silently dropped one' as 'all good'.\n\
+             \n\
+             To fix:\n\
+               - lower the extension's [extension].minimum_api_version to one the host\n\
+                 supports, or upgrade Ableton Live, or\n\
+               - drop --strict if a skipped (incompatible) extension is acceptable for\n\
+                 this run. `rackabel dev status` lists every skipped extension and why."
         }
     }
 }

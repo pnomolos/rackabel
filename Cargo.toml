@@ -7,6 +7,10 @@ repository = "https://github.com/pnomolos/rackabel"
 license = "MIT"
 keywords = ["ableton", "max-for-live", "m4l", "music", "cli"]
 categories = ["command-line-utilities", "multimedia::audio"]
+# Disable test auto-discovery so `tests/fakehost/main.rs` (the FakeHost fixture bin,
+# declared as a [[bin]] below) is NOT also picked up as an integration-test target.
+# The two real test targets (`integration`, `trycmd`) are declared explicitly.
+autotests = false
 
 [dependencies]
 anyhow = "1"
@@ -26,6 +30,13 @@ plist = "1"
 home = "0.5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# Daemon mechanics (SPEC D §5): setsid/setpgid (pre_exec), killpg, and kill(pid, None)
+# liveness probing. std exposes none of these portably, so the dev-host daemon/host/ipc
+# modules use nix (all #[cfg(unix)]-gated; Windows gets a clean RK0307 stub — §9.3).
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["process", "signal", "fs"] }
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
@@ -38,6 +49,23 @@ trycmd = "0.15"
 [[test]]
 name = "integration"
 path = "tests/integration/main.rs"
+
+# Explicitly declared (autotests is off) so the trycmd transcript harness still runs.
+[[test]]
+name = "trycmd"
+path = "tests/trycmd.rs"
+
+# The hermetic stand-in for the real Extension Host (SPEC D §6). A tiny binary the
+# daemon-lifecycle tests point the daemon at via the RACKABEL_HOST_CMD seam, so no test
+# ever launches real Live/node. It prints the synthetic "Started: Extension Host 1.0.0"
+# banner + per-extension liveness lines, then sleeps; SIGHUP re-prints the reload banner;
+# SIGTERM exits 0; RK_FAKEHOST_CRASH=<ms> makes it exit non-zero after <ms> (crash-loop
+# tests). Declared as a real bin (not #[cfg(test)]) so `cargo test` builds it and tests
+# can resolve it by name; it is excluded from the published crate's default binaries by
+# being un-referenced from main and is harmless if shipped.
+[[bin]]
+name = "rk-fakehost"
+path = "tests/fakehost/main.rs"
 
 [profile.release]
 lto = true

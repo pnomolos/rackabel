@@ -90,6 +90,235 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Long-form help for an error code (cargo --explain).
     Explain(ExplainArgs),
+    /// The managed dev host: bare `dev` runs the loop; verbs control its lifecycle.
+    Dev(DevArgs),
+    /// Hidden re-exec target: the detached daemon process (DESIGN §3.1, SPEC D §1).
+    /// Never invoked by a user; `dev start`/`dev` re-exec the current binary with this
+    /// subcommand to become the session-leading daemon.
+    #[command(name = "__daemon", hide = true)]
+    Daemon(DaemonArgs),
+}
+
+// --- the `dev` group (DESIGN §2 dev table, §3) ---------------------------------
+//
+// `rackabel dev` is a hybrid: a *bare* form (the flagship loop — start-if-needed +
+// watch the registered set + tail logs) AND a verb group (start/stop/status/register/
+// …). clap resolves a token equal to a verb to the verb (verbs always win the parse,
+// §2 name-vs-verb precedence); anything else falls through to the bare form's
+// positional `[NAME… | PATH]`. `--only GLOB` and the `-- <NAME…>` separator ALWAYS
+// route through the registry name matcher, never the verb table (§3.3 scoping) — so
+// `rackabel dev --only test` watches the extension named `test` while `rackabel dev
+// test` is the subcommand.
+
+/// `rackabel dev [NAME… | PATH] [--only GLOB] [--no-auto-reload] [--raw]
+///  [--inspect[=host:port]] [--emit-launch-config]` + the verb subcommands.
+#[derive(Args, Debug)]
+pub struct DevArgs {
+    /// A `dev` verb, or absent for the bare flagship loop.
+    #[command(subcommand)]
+    pub command: Option<DevCommand>,
+
+    /// Bare-dev working set: registry NAMEs (post-disambiguation) or a single PATH.
+    /// A token equal to a verb is parsed as that verb instead (verbs win); everything
+    /// after a `--` separator is treated as NAMEs (never verbs).
+    #[arg(value_name = "NAME|PATH", trailing_var_arg = true)]
+    pub names: Vec<String>,
+
+    /// Restrict the watched/loaded set to entries matching this glob (a transient
+    /// working set). ALWAYS matches registry names, never the verb table (§3.3).
+    #[arg(long, value_name = "GLOB")]
+    pub only: Option<String>,
+
+    /// Manual-reload mode: do not auto-reload on change ([r] / `dev reload` instead).
+    #[arg(long)]
+    pub no_auto_reload: bool,
+
+    /// Show unfiltered host/Node output in the inline log tail.
+    #[arg(long)]
+    pub raw: bool,
+
+    /// Attach the Node inspector to the host (default 127.0.0.1:9229). Restarts a
+    /// running host with the inspector enabled, announcing what it did (§7).
+    #[arg(long, value_name = "HOST:PORT", num_args = 0..=1, default_missing_value = "")]
+    pub inspect: Option<String>,
+
+    /// Write a VS Code `launch.json` for attaching the debugger and exit-or-continue.
+    #[arg(long)]
+    pub emit_launch_config: bool,
+}
+
+/// The `dev` verb subcommands (DESIGN §2 dev table).
+#[derive(Subcommand, Debug)]
+pub enum DevCommand {
+    /// Launch the managed Extension Host (daemonized by default).
+    Start(DevStartArgs),
+    /// Stop the daemon cleanly.
+    Stop,
+    /// Daemon + per-extension state, Live/host paths, inspector + reload metrics.
+    Status,
+    /// Add a path to the persistent registry.
+    Register(DevRegisterArgs),
+    /// Remove an entry from the registry.
+    Unregister(DevUnregisterArgs),
+    /// Flip a dormant entry back to enabled.
+    Enable(DevNameArg),
+    /// Flip an entry to disabled (registered but not loaded).
+    Disable(DevNameArg),
+    /// Show the registry with status columns.
+    #[command(alias = "ls")]
+    List,
+    /// Explicit form of bare `dev` (no implicit daemon start).
+    Watch(DevWatchArgs),
+    /// Force a whole-host reload now.
+    Reload(DevReloadArgs),
+    /// Tail/filter the host's per-extension log sink.
+    Logs(DevLogsArgs),
+    /// Run the project's tests / headless smoke (the CI entry point, §3.8).
+    Test(DevTestArgs),
+}
+
+/// `rackabel dev start [--live PATH] [--foreground] [--inspect[=host:port]] [--emit-launch-config]`
+#[derive(Args, Debug)]
+pub struct DevStartArgs {
+    /// Run the host in the foreground, tied to this shell (no daemonize).
+    #[arg(long)]
+    pub foreground: bool,
+
+    /// Attach the Node inspector (default 127.0.0.1:9229).
+    #[arg(long, value_name = "HOST:PORT", num_args = 0..=1, default_missing_value = "")]
+    pub inspect: Option<String>,
+
+    /// Write a VS Code `launch.json` and exit-or-continue.
+    #[arg(long)]
+    pub emit_launch_config: bool,
+}
+
+/// `rackabel dev register [PATH] [--recursive] [--name NAME] [--disabled]`
+#[derive(Args, Debug)]
+pub struct DevRegisterArgs {
+    /// Project path to register (defaults to the current directory).
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// Register every manifest-bearing subdir (the monorepo case).
+    #[arg(long)]
+    pub recursive: bool,
+
+    /// Override the entry name (single-path only). Mutually exclusive with
+    /// `--recursive` — one name cannot label N members (rejected at parse time,
+    /// exit 2, §3.2).
+    #[arg(long, value_name = "NAME", conflicts_with = "recursive")]
+    pub name: Option<String>,
+
+    /// Register but leave dormant (`enabled = false`).
+    #[arg(long)]
+    pub disabled: bool,
+}
+
+/// `rackabel dev unregister <NAME|PATH> [--recursive]`
+#[derive(Args, Debug)]
+pub struct DevUnregisterArgs {
+    /// The registry name or project path to remove.
+    #[arg(value_name = "NAME|PATH")]
+    pub target: String,
+
+    /// Remove every entry under the given path (the recursive-register inverse).
+    #[arg(long)]
+    pub recursive: bool,
+}
+
+/// `rackabel dev enable|disable <NAME|PATH>`
+#[derive(Args, Debug)]
+pub struct DevNameArg {
+    /// The registry name or project path.
+    #[arg(value_name = "NAME|PATH")]
+    pub target: String,
+}
+
+/// `rackabel dev watch [NAME… | PATH] [--only GLOB] [--no-auto-reload]`
+#[derive(Args, Debug)]
+pub struct DevWatchArgs {
+    /// Working set: registry NAMEs or a single PATH (§3.3 scoping).
+    #[arg(value_name = "NAME|PATH")]
+    pub names: Vec<String>,
+
+    /// Restrict to entries matching this glob (matches registry names, §3.3).
+    #[arg(long, value_name = "GLOB")]
+    pub only: Option<String>,
+
+    /// Do not auto-reload on change.
+    #[arg(long)]
+    pub no_auto_reload: bool,
+}
+
+/// `rackabel dev reload [NAME…] [--strict] [--json]`
+#[derive(Args, Debug)]
+pub struct DevReloadArgs {
+    /// Reload only these registry NAMEs (default: the whole loaded set).
+    #[arg(value_name = "NAME")]
+    pub names: Vec<String>,
+
+    /// Treat a pre-filtered (host-incompatible) skip as fatal (exit 1).
+    #[arg(long)]
+    pub strict: bool,
+}
+
+/// `rackabel dev logs [NAME] [--follow] [--since 5m] [--level LEVEL] [--json] [--raw]`
+#[derive(Args, Debug)]
+pub struct DevLogsArgs {
+    /// The registry name to filter to (default: all extensions).
+    #[arg(value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Stream new lines as they arrive (Wrangler `tail`).
+    #[arg(long, short = 'f')]
+    pub follow: bool,
+
+    /// Only lines newer than this (e.g. `5m`, `1h`, `30s`).
+    #[arg(long, value_name = "DURATION")]
+    pub since: Option<String>,
+
+    /// Only lines at or above this level (info|warn|error).
+    #[arg(long, value_name = "LEVEL")]
+    pub level: Option<String>,
+
+    /// Show unfiltered host/Node output (internals included).
+    #[arg(long)]
+    pub raw: bool,
+}
+
+/// `rackabel dev test [NAME… | PATH] [--bail] [--json] [-- <runner args>]`
+#[derive(Args, Debug)]
+pub struct DevTestArgs {
+    /// Project NAMEs/PATH to test (default: the registered set / cwd project).
+    #[arg(value_name = "NAME|PATH")]
+    pub names: Vec<String>,
+
+    /// Fail fast on the first failing test.
+    #[arg(long)]
+    pub bail: bool,
+
+    /// Arguments forwarded verbatim to the underlying runner (vitest), after `--`.
+    #[arg(last = true, value_name = "RUNNER ARGS")]
+    pub runner_args: Vec<String>,
+}
+
+/// The hidden `__daemon` re-exec target's arguments (DESIGN §3.1, SPEC D §1). Carried
+/// across the re-exec so the daemon child knows which Live to serve, where to bind its
+/// socket, and where its state root is.
+#[derive(Args, Debug)]
+pub struct DaemonArgs {
+    /// The resolved Live `.app` this daemon serves.
+    #[arg(long, value_name = "PATH")]
+    pub live: PathBuf,
+
+    /// The control socket path to bind.
+    #[arg(long, value_name = "PATH")]
+    pub sock: PathBuf,
+
+    /// The `RACKABEL_HOME` state root.
+    #[arg(long, value_name = "PATH")]
+    pub state: PathBuf,
 }
 
 /// The kind of project to scaffold.

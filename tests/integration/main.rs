@@ -6,6 +6,9 @@
 mod build;
 mod common;
 mod deploy;
+// The managed dev host surface + FakeHost fixture tests (milestone 0.3, Unix-only).
+#[cfg(unix)]
+mod dev;
 mod doctor;
 mod new;
 mod pack;

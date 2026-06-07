@@ -19,6 +19,12 @@
 mod cli;
 mod commands;
 mod context;
+// The managed dev host (milestone 0.3). The daemon/host/ipc mechanics use Unix-only
+// primitives (setsid/setpgid/killpg via nix), so the whole module is #[cfg(unix)];
+// the dev command surface degrades to a clean RK0307 "Unix-only for now" on Windows
+// (SPEC D §5/§9.3). The module is itself #[cfg(unix)]-gated internally.
+#[cfg(unix)]
+mod dev;
 mod error;
 mod manifest;
 mod max;
@@ -66,5 +72,39 @@ fn dispatch(command: Command, ctx: &Ctx) -> CmdResult<()> {
         Command::Validate(args) => commands::validate::run(&args, ctx),
         Command::Doctor(args) => commands::doctor::run(&args, ctx),
         Command::Explain(args) => commands::explain::run(&args, ctx),
+        Command::Dev(args) => dispatch_dev(args, ctx),
+        Command::Daemon(args) => dispatch_daemon(args, ctx),
     }
+}
+
+/// Route `rackabel dev …`. Unix runs the dev group; other platforms return a clean
+/// framed "dev host is Unix-only for now" (RK0307, SPEC D §5/§9.3) rather than a
+/// missing-module compile error or a panic.
+#[cfg(unix)]
+fn dispatch_dev(args: cli::DevArgs, ctx: &Ctx) -> CmdResult<()> {
+    commands::dev::run(args, ctx)
+}
+
+#[cfg(not(unix))]
+fn dispatch_dev(_args: cli::DevArgs, _ctx: &Ctx) -> CmdResult<()> {
+    Err(dev_unix_only())
+}
+
+#[cfg(unix)]
+fn dispatch_daemon(args: cli::DaemonArgs, ctx: &Ctx) -> CmdResult<()> {
+    commands::dev::run_daemon(args, ctx)
+}
+
+#[cfg(not(unix))]
+fn dispatch_daemon(_args: cli::DaemonArgs, _ctx: &Ctx) -> CmdResult<()> {
+    Err(dev_unix_only())
+}
+
+#[cfg(not(unix))]
+fn dev_unix_only() -> error::RkError {
+    error::RkError::of(
+        error::ErrorCode::DaemonStartFailed,
+        "the managed dev host is macOS/Unix-only for now",
+        "the dev loop (rackabel dev) runs on macOS/Linux; build/deploy/pack work here",
+    )
 }

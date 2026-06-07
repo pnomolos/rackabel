@@ -184,6 +184,25 @@ pub fn usable_node_with_esbuild(project_root: &Path) -> Option<PathBuf> {
     if ok { Some(node) } else { None }
 }
 
+/// Resolve the compiled `rk-fakehost` fixture binary (the hermetic Extension Host
+/// stand-in, SPEC D §6). Daemon-lifecycle tests feed this to the daemon via the
+/// `RACKABEL_HOST_CMD` seam so nothing real is launched. Uses assert_cmd's cargo-bin
+/// resolution by name.
+pub fn fakehost_bin() -> PathBuf {
+    assert_cmd::cargo::cargo_bin("rk-fakehost")
+}
+
+/// Spawn the FakeHost directly with the given extension names and env, returning the
+/// child `Command` pre-wired. Callers add `.env(...)` (e.g. RK_FAKEHOST_CRASH) and
+/// drive it. This proves the fixture's contract in isolation.
+pub fn fakehost_cmd(ext_names: &[&str]) -> Command {
+    let mut cmd = Command::new(fakehost_bin());
+    if !ext_names.is_empty() {
+        cmd.env("RK_FAKEHOST_EXT", ext_names.join(","));
+    }
+    cmd
+}
+
 /// A `node` on PATH (regardless of esbuild). Used to gate `node --check`-only paths.
 pub fn which_node() -> Option<PathBuf> {
     let out = Command::new("sh")

@@ -60,6 +60,20 @@ pub enum ErrorCode {
     NoNodeRuntime,
     /// Developer Mode off (navigational gate for the dev loop).
     DeveloperModeOff,
+    // -- dev host environment (exit 3) --
+    /// The managed dev host daemon did not come up within the start window.
+    DaemonStartFailed,
+    /// The control-socket protocol version did not match (restart the dev host).
+    ProtocolMismatch,
+    /// A command needs a running daemon and none is up (`rackabel dev` to start one).
+    NoDaemon,
+    /// The host process will not stay up (crash-looping); awaits an explicit reload.
+    HostCrashLooping,
+    /// Could not acquire the registry lock within the timeout (another rackabel running).
+    RegistryLocked,
+    /// `register --name` collides irrecoverably with a reserved verb / existing name
+    /// under `--no-input` (cannot auto-disambiguate without prompting).
+    NameCollision,
     // -- build / runtime (exit 1) --
     /// esbuild bundle failed.
     BuildFailed,
@@ -71,6 +85,11 @@ pub enum ErrorCode {
     DeployCopyFailed,
     /// Pack failed (official CLI non-zero, wrapped).
     PackFailed,
+    // -- dev host build / runtime (exit 1) --
+    /// A targeted extension threw during `activate()` on reload.
+    ReloadActivateFailed,
+    /// The node host module failed to spawn (bad node / host module path).
+    HostLaunchFailed,
     // -- validation (exit 4) --
     /// Manifest incomplete (missing name/author/entry/version/minimumApiVersion).
     ManifestIncomplete,
@@ -82,6 +101,8 @@ pub enum ErrorCode {
     IncludeInvalid,
     /// Stable-identifier drift (command id removed/renamed).
     IdentifierDrift,
+    /// `dev reload --strict` and an extension was pre-filtered as host-incompatible.
+    SkippedIncompatible,
 }
 
 impl ErrorCode {
@@ -100,16 +121,25 @@ impl ErrorCode {
             Self::NativeDepNotCompiled => "RK0304",
             Self::NoNodeRuntime => "RK0305",
             Self::DeveloperModeOff => "RK0306",
+            Self::DaemonStartFailed => "RK0307",
+            Self::ProtocolMismatch => "RK0308",
+            Self::NoDaemon => "RK0309",
+            Self::HostCrashLooping => "RK0310",
+            Self::RegistryLocked => "RK0311",
+            Self::NameCollision => "RK0312",
             Self::BuildFailed => "RK1301",
             Self::TypecheckFailed => "RK1302",
             Self::BundleSanity => "RK1303",
             Self::DeployCopyFailed => "RK1304",
             Self::PackFailed => "RK1305",
+            Self::ReloadActivateFailed => "RK1306",
+            Self::HostLaunchFailed => "RK1307",
             Self::ManifestIncomplete => "RK4001",
             Self::ApiVersionTooHigh => "RK4002",
             Self::VersionNotBumped => "RK4003",
             Self::IncludeInvalid => "RK4004",
             Self::IdentifierDrift => "RK4005",
+            Self::SkippedIncompatible => "RK4006",
         }
     }
 
@@ -133,17 +163,29 @@ impl ErrorCode {
             | Self::NoLiveInstall
             | Self::NativeDepNotCompiled
             | Self::NoNodeRuntime
-            | Self::DeveloperModeOff => ExitClass::Environment,
+            | Self::DeveloperModeOff
+            | Self::DaemonStartFailed
+            | Self::ProtocolMismatch
+            | Self::NoDaemon
+            | Self::HostCrashLooping
+            | Self::RegistryLocked => ExitClass::Environment,
+            // NameCollision is a usage mistake: the invocation can't be satisfied as
+            // given (a `--name` colliding under `--no-input`), so it sits in the usage
+            // class (2) like UsageError, per SPEC D §3.
+            Self::NameCollision => ExitClass::Usage,
             Self::BuildFailed
             | Self::TypecheckFailed
             | Self::BundleSanity
             | Self::DeployCopyFailed
-            | Self::PackFailed => ExitClass::BuildRuntime,
+            | Self::PackFailed
+            | Self::ReloadActivateFailed
+            | Self::HostLaunchFailed => ExitClass::BuildRuntime,
             Self::ManifestIncomplete
             | Self::ApiVersionTooHigh
             | Self::VersionNotBumped
             | Self::IncludeInvalid
-            | Self::IdentifierDrift => ExitClass::Validation,
+            | Self::IdentifierDrift
+            | Self::SkippedIncompatible => ExitClass::Validation,
         }
     }
 
@@ -161,16 +203,25 @@ impl ErrorCode {
         Self::NativeDepNotCompiled,
         Self::NoNodeRuntime,
         Self::DeveloperModeOff,
+        Self::DaemonStartFailed,
+        Self::ProtocolMismatch,
+        Self::NoDaemon,
+        Self::HostCrashLooping,
+        Self::RegistryLocked,
+        Self::NameCollision,
         Self::BuildFailed,
         Self::TypecheckFailed,
         Self::BundleSanity,
         Self::DeployCopyFailed,
         Self::PackFailed,
+        Self::ReloadActivateFailed,
+        Self::HostLaunchFailed,
         Self::ManifestIncomplete,
         Self::ApiVersionTooHigh,
         Self::VersionNotBumped,
         Self::IncludeInvalid,
         Self::IdentifierDrift,
+        Self::SkippedIncompatible,
     ];
 }
 

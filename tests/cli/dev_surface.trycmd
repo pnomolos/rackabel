@@ -1,0 +1,53 @@
+The `dev` group's parse-time and no-daemon contracts hold without Live (FOUNDATION
+surface guarantees, SPEC D §3/§7). These are deterministic on any machine: they never
+touch Live, the host, or the socket. As the agents fill in the verbs, the
+"not implemented yet" bodies become the real §6.2 transcripts; the EXIT CODES and the
+name-vs-verb routing asserted here are the frozen contract.
+
+`register --name` with `--recursive` is rejected at PARSE time (exit 2) — one name
+cannot label N members (§3.2).
+
+```
+$ rackabel dev register --name foo --recursive
+? 2
+error: the argument '--name <NAME>' cannot be used with '--recursive'
+
+Usage: rackabel dev register --name <NAME> [PATH]
+
+For more information, try '--help'.
+
+```
+
+A `dev` verb that needs a running daemon, with none up, is an ENVIRONMENT error
+(exit 3, RK0309) — never a hang, never a silent default (§7 `--no-input`).
+
+```
+$ rackabel dev reload --no-input
+? 3
+error: `rackabel dev reload` is not implemented yet [RK0309]
+  help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
+(run `rackabel explain RK0309` for details)
+
+```
+
+A bare token that is NOT a verb routes to the bare loop (the registry name matcher),
+not the verb table — `rackabel dev test` is the subcommand (exit 1, RK1306), while
+`rackabel dev --only test` targets the extension named `test` (the bare loop, exit 3).
+
+```
+$ rackabel dev test --no-input
+? 1
+error: `rackabel dev test` is not implemented yet [RK1306]
+  help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
+(run `rackabel explain RK1306` for details)
+
+```
+
+```
+$ rackabel dev --only test --no-input
+? 3
+error: the bare `rackabel dev` loop is not implemented yet [RK0307]
+  help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
+(run `rackabel explain RK0307` for details)
+
+```

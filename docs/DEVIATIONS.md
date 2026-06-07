@@ -551,3 +551,72 @@ or after the user installs). A `new` that vendors and *also* runs the install is
 improvement once rackabel drives a package manager end-to-end (cf. D-19); the contract
 ("a successful `new` never shows a red `error:`") is honored now. No spec behavior is
 dropped — the build still happens, just after the one documented `npm install` step.
+
+---
+
+## 0.3 dev host (foundation)
+
+These were decided while landing the 0.3 FOUNDATION (clap surface for the `dev` group,
+shared types, module stubs, registry model + IO, FakeHost fixture, new RK codes). SPEC
+D (daemon architecture) and SPEC H (verified host behavior) are the authoritative 0.3
+inputs; entries note where the implementation refines them.
+
+### D-43. `RK0312 NameCollision` is exit class 2 (usage), not 3 (SPEC D §3)
+
+SPEC D §3's error table lists `RK0312 NameCollision` as "usage, 2". One sentence later
+the §3 prose groups it loosely with the environment codes. The implementation honors
+the table: `NameCollision.class()` is `ExitClass::Usage` (exit 2), because a `--name`
+that collides irrecoverably under `--no-input` is an *invocation* the user can fix by
+passing a different name (the same class as the existing `UsageError`). Recorded so the
+2-vs-3 choice is explicit; the §3 table is the source of truth.
+
+### D-44. NDJSON wire form uses an envelope struct, not a flattened `v` field (SPEC D §2/§4)
+
+SPEC D §4 sketches `Request`/`Response` enums each carrying `#[serde(default)] v: u32`.
+A `#[serde(tag="type")]` enum cannot also hold a sibling field, so the implementation
+puts the protocol version on a thin `RequestEnvelope`/`ResponseEnvelope` wrapper
+(`{ v, #[serde(flatten)] request|response }`). The on-the-wire JSON is byte-identical
+to the spec's intent — `{"v":1,"type":"ping"}` — and `v` still defaults to
+`DEV_PROTOCOL_VERSION` and is checked on receipt (`RK0308` on mismatch). The enums
+themselves stay clean (`Request`/`Response`), matching the spec's variant names.
+
+### D-45. A `Subscribe` request is added to the IPC table (SPEC D §2)
+
+SPEC D §2 describes an unsolicited daemon→client `event` stream "on a subscribed conn"
+but lists no request that performs the subscribe. The implementation adds an explicit
+`Request::Subscribe` so the bare-`dev`/`watch` UI can opt a connection into the
+`DevEvent` broadcast (the spec's `event (daemon→client …)` row). This is additive and
+does not change any existing message; it just names the action the spec implied.
+
+### D-46. `autotests = false` + explicit test targets for the FakeHost bin (SPEC D §6)
+
+SPEC D §6 offers the FakeHost as either a `[[bin]]` or a committed shell script. The
+bin form is chosen (a real Rust binary tests resolve via assert_cmd's cargo-bin lookup,
+giving deterministic behavior + the `RK_FAKEHOST_CRASH`/`HANG`/`EXT` seams). Because the
+bin lives at `tests/fakehost/main.rs`, cargo's test auto-discovery would ALSO claim it
+as an integration-test target ("present in multiple build targets"). Fix: set
+`autotests = false` and declare the two real test targets (`integration`, `trycmd`)
+explicitly — matching the existing explicit `[[test]] integration` style. No test is
+lost; discovery is just made explicit.
+
+### D-47. Foundation freezes `Inspect` + extra path helpers beyond the SPEC D §4 sketch
+
+SPEC D §4 references a `host:port` inspect value and per-Live `sock_path`/`pid_path`/
+`log_dir`. The foundation adds the small supporting surface those imply so every agent
+compiles against one definition: an `Inspect { host, port }` type with a `parse()` for
+the `--inspect[=host:port]` forms + a `default_endpoint()` (127.0.0.1:9229, §7), and a
+`host_out_path` helper (the daemon's captured-host-stdio file, SPEC D §1). Additive,
+no spec behavior changed.
+
+### D-48. Registry CRUD model is implemented in the foundation (not stubbed) (SPEC D §3/§4)
+
+SPEC D assigns the registry *verbs* (`dev register`/`list`/…) to the REGISTRY agent and
+the registry *model* (serde + file IO + `RACKABEL_HOME` pathing) to the FOUNDATION. The
+two are entangled (the verbs are thin wrappers over `Registry::add`/`remove`/
+`set_enabled`/`disambiguate`/`prefilter`), so the foundation implements the FULL
+`Registry` model from the §4 signature — including working `add`/`add_recursive`/
+`remove`/`set_enabled`/`disambiguate`/`prefilter` and the `O_EXCL` lockfile — and only
+the command *verbs* are stubbed. This keeps the model correct and unit-tested from day
+one (the registry agent wires the verbs + the interactive/`--no-input` `RK0312` policy
+and the `[workspace].members` reconciliation on top of it). The command files remain
+exclusively the registry agent's to fill.
