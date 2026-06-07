@@ -9,6 +9,9 @@ mod deploy;
 // The managed dev host surface + FakeHost fixture tests (milestone 0.3, Unix-only).
 #[cfg(unix)]
 mod dev;
+// The hermetic daemon-lifecycle tests (DAEMON-CORE): real binary + FakeHost seam.
+#[cfg(unix)]
+mod dev_daemon;
 mod doctor;
 mod new;
 mod pack;

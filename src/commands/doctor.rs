@@ -1258,6 +1258,7 @@ fn quiet_ctx(ctx: &Ctx) -> Ctx {
         ableton_eh_node: ctx.ableton_eh_node.clone(),
         ableton_extensions_dir: ctx.ableton_extensions_dir.clone(),
         ableton_storage_base: ctx.ableton_storage_base.clone(),
+        rackabel_host_cmd: ctx.rackabel_host_cmd.clone(),
     }
 }
 

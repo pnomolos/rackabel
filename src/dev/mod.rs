@@ -22,8 +22,11 @@
 pub mod daemon;
 pub mod host;
 pub mod ipc;
+pub mod launch_config;
 pub mod logs;
+pub mod preflight;
 pub mod registry;
+pub mod resolve;
 pub mod watch;
 
 use std::path::{Path, PathBuf};

@@ -24,6 +24,10 @@ pub struct State {
     pub build_hash: Option<String>,
     /// RFC3339 timestamp of the last deploy.
     pub deployed_at: Option<String>,
+    /// The Live `.app` chosen for this project's dev loop (DESIGN §3.6 persisted
+    /// multi-Live choice). Recorded so `rackabel dev` recalls the choice instead of
+    /// re-prompting; the per-Live daemon socket/pidfile is keyed off this path's hash.
+    pub dev_live: Option<String>,
 }
 
 /// Load the state for a project root. A missing file yields `State::default()`.
@@ -95,6 +99,7 @@ mod tests {
             last_packed_version: Some("1.2.3".into()),
             build_hash: Some("deadbeef".into()),
             deployed_at: Some("2026-06-06T00:00:00Z".into()),
+            dev_live: None,
         };
         save(tmp.path(), &s).unwrap();
         let back = load(tmp.path()).unwrap();

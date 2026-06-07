@@ -13,6 +13,12 @@ use crate::cli::Cli;
 use crate::ui::color::ColorMode;
 
 /// Resolved globals, shared (by reference) with every command.
+///
+/// `Clone` so the detached daemon (DESIGN §3.1) can own a snapshot of the resolved
+/// context across the `__daemon` re-exec / supervisor thread boundary (the daemon
+/// reuses `Ctx`-taking services — `user_library::resolve_newest`, `host_config` — from
+/// a background thread, where a borrow would not outlive the request).
+#[derive(Clone)]
 pub struct Ctx {
     /// `--no-input`: forbid every prompt; a branch that would prompt becomes a
     /// deterministic error (DESIGN §7).
@@ -41,6 +47,12 @@ pub struct Ctx {
     pub ableton_eh_node: Option<PathBuf>,
     pub ableton_extensions_dir: Option<PathBuf>,
     pub ableton_storage_base: Option<PathBuf>,
+    /// The dev-host launch-command test seam (SPEC D §6). When set (from
+    /// `RACKABEL_HOST_CMD`, a space-or-`\x1f`-separated argv), the daemon runs this
+    /// command verbatim as the host child instead of
+    /// `EH_NODE -e require(EH_MOD).initialize(...)`, so the hermetic daemon-lifecycle
+    /// tests point the daemon at the FakeHost fixture and never launch real node/Live.
+    pub rackabel_host_cmd: Option<Vec<String>>,
 }
 
 impl Ctx {
@@ -94,6 +106,7 @@ impl Ctx {
                 .storage_base
                 .clone()
                 .or_else(|| env_path("ABLETON_STORAGE_BASE")),
+            rackabel_host_cmd: parse_host_cmd(std::env::var_os("RACKABEL_HOST_CMD")),
         }
     }
 
@@ -102,6 +115,24 @@ impl Ctx {
     pub fn echo_on(&self) -> bool {
         !self.json
     }
+}
+
+/// Parse a `RACKABEL_HOST_CMD` value into an argv. The fields are split on the ASCII
+/// unit separator (`\x1f`) if present (so a path with spaces survives), else on
+/// whitespace. An empty/absent value yields `None`.
+fn parse_host_cmd(raw: Option<std::ffi::OsString>) -> Option<Vec<String>> {
+    let raw = raw?;
+    let s = raw.to_string_lossy();
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = if s.contains('\u{1f}') {
+        s.split('\u{1f}').map(|p| p.to_string()).collect()
+    } else {
+        s.split_whitespace().map(|p| p.to_string()).collect()
+    };
+    if parts.is_empty() { None } else { Some(parts) }
 }
 
 // --- TTY probing -----------------------------------------------------------

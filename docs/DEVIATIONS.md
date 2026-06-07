@@ -620,3 +620,78 @@ the command *verbs* are stubbed. This keeps the model correct and unit-tested fr
 one (the registry agent wires the verbs + the interactive/`--no-input` `RK0312` policy
 and the `[workspace].members` reconciliation on top of it). The command files remain
 exclusively the registry agent's to fill.
+
+## 0.3 daemon-core
+
+### D-49. `RACKABEL_HOST_CMD` host-launch seam lands on `Ctx` (SPEC D §6)
+
+SPEC D §6 recommends a `host_cmd_override` on `HostConfig` fed from a `RACKABEL_HOST_CMD`
+env read in `Ctx`, as the single clean seam that keeps daemon-lifecycle tests off real
+Live/node. Implemented exactly: `Ctx.rackabel_host_cmd: Option<Vec<String>>` parses
+`RACKABEL_HOST_CMD` (split on `\x1f` if present, else whitespace) at `Ctx` construction;
+`resolve::host_config` threads it into `HostConfig::host_cmd_override`; `Host` runs it
+verbatim (with `--inspect` still appended) instead of the `EH_NODE -e require(EH_MOD)…`
+recipe. This is the spec's own recommendation, recorded because it adds a public `Ctx`
+field. Production code never sets it; only the FakeHost-driven tests do.
+
+### D-50. `Ctx` derives `Clone` (DESIGN §3.1 daemon model)
+
+The detached daemon supervises the host from a background thread that re-uses
+`Ctx`-taking 0.2 services (`user_library::resolve_newest`, `resolve::host_config`) across
+the request/supervisor boundary, where a borrow cannot outlive the call. `Ctx` is made
+`Clone` so the daemon owns a snapshot. All fields were already `Clone`; purely additive,
+no behavior change.
+
+### D-51. `.rackabel/state.toml` gains `dev_live` for the persisted multi-Live choice (DESIGN §3.6, SPEC D §7)
+
+SPEC D §7 / DESIGN §3.6 require the chosen Live `.app` to be persisted in
+`.rackabel/state.toml` (project) so `rackabel dev` recalls it instead of re-prompting, and
+keyed into the per-Live daemon socket/pidfile hash. The sidecar `State` (DESIGN §4.3)
+gains an optional `dev_live: Option<String>` field, written best-effort by
+`resolve::resolve`. Additive + backward-compatible (a missing field defaults to `None`).
+
+### D-52. Daemon-core subdivides its owned surface into `preflight`/`resolve`/`launch_config` modules
+
+SPEC D §3 assigns `dev/host.rs` + `dev/daemon.rs` + `commands/dev/{start,stop,status}.rs`
+to daemon-core without prescribing internal helper modules. To keep those files focused,
+daemon-core adds three small **daemon-core-owned** modules: `dev/preflight.rs` (the §3.6
+Live-running / Dev-Mode block-and-wait gates + the behavioral detection seams),
+`dev/resolve.rs` (the §3.6 Live + host-binary resolution, persisted choice, and the §3.6
+storage/temp `ExtensionSpec` builder), and `dev/launch_config.rs` (the §7
+`--emit-launch-config` writer). All are within daemon-core's assigned scope; no other
+agent's file is touched. The watch/registry/logs/dev-test modules remain stubs owned by
+their agents.
+
+### D-53. The `LogSink` stub is implemented as a working fan-out (logs agent enriches later)
+
+SPEC D §3 assigns `dev/logs.rs` to the LOGS agent. The daemon-core host lifecycle,
+however, *requires* a non-panicking sink to capture the host child's stdout/stderr and to
+broadcast lifecycle events to `dev logs --follow` subscribers — a `todo_err` stub would
+make the daemon unrunnable and untestable. Daemon-core therefore lands a minimal-but-real
+fan-out in `logs.rs` (a session log file + broadcast senders + best-effort `[<ext>]:`
+attribution), keeping the frozen `LogSink`/`LogLine`/`LineKind` surface intact. The LOGS
+agent layers the rich `ExtensionHost.txt` parser, per-extension keying, and sourcemap
+mapping on top without changing that surface (`map_through_sourcemap`/`tail_exthost`
+remain its stubs).
+
+### D-54. Daemon runs its own accept loop instead of `ipc::serve` (SPEC D §2)
+
+SPEC D §2's `ipc::serve(listener, handler)` scaffold blocks forever on
+`listener.incoming()`, which cannot honor a `shutdown` request. The daemon instead runs an
+equivalent nonblocking accept loop (`serve_until_shutdown`) that polls the shutdown flag,
+spawning one thread per connection and dispatching to the same `ipc::Handler` trait object
+the foundation froze. Same wire protocol, same handler contract; only the accept-loop
+plumbing is daemon-local so the daemon can shut down cleanly (killpg host group, unlink
+socket + pidfile, exit). The foundation `ipc::serve` is left in place for any caller that
+wants the simple blocking form.
+
+### D-55. Crash mode in the FakeHost prints the connected marker before crashing (SPEC D §6, SPEC H §6)
+
+The foundation FakeHost's `RK_FAKEHOST_CRASH` exited before printing the connected marker.
+The verified host abort (incompatible `minimumApiVersion` → uncaughtException during
+*activation*, SPEC H §6 q9_6) happens AFTER the Live greeting — so the daemon's
+crash-recovery supervisor only fires on a host that reached `Running` then died. The
+FakeHost's crash mode now prints the connected marker + liveness first by default
+(`RK_FAKEHOST_CRASH_PRECONNECT=1` restores the pre-connect crash for the launch-fails
+case), so the crash-respawn/crash-loop tests exercise the real supervisor path. The
+existing "crash mode exits non-zero" fixture assertion is unaffected.

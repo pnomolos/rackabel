@@ -126,6 +126,7 @@ mod tests {
             ableton_eh_node: None,
             ableton_extensions_dir: None,
             ableton_storage_base: None,
+            rackabel_host_cmd: None,
         }
     }
 

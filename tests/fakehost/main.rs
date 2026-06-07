@@ -97,10 +97,25 @@ fn main() {
 
     print_banner();
 
-    // Crash mode: exit non-zero after the configured delay (crash-loop fixture).
+    // Crash mode: exit non-zero after the configured delay (crash-loop fixture). The
+    // real host's verified abort (incompatible minimumApiVersion → uncaughtException
+    // during activation, SPEC H §6 q9_6) happens AFTER the Live greeting, so by default
+    // crash mode prints the connected marker + liveness first, so the daemon observes a
+    // Running host that then crashes — the input the crash-recovery supervisor needs.
+    // Set RK_FAKEHOST_CRASH_PRECONNECT=1 to crash BEFORE connecting (the launch-fails
+    // case) instead.
     if let Ok(ms) = std::env::var("RK_FAKEHOST_CRASH")
         && let Ok(ms) = ms.parse::<u64>()
     {
+        let preconnect = std::env::var("RK_FAKEHOST_CRASH_PRECONNECT")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        if !preconnect {
+            print_connected();
+            print_liveness(&exts);
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        }
         std::thread::sleep(Duration::from_millis(ms));
         // Mimic an uncaughtException-style abort.
         eprintln!(
