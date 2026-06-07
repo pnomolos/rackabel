@@ -82,13 +82,13 @@ fn decide_and_report(ctx: &Ctx, name: &str, declared: Option<u32>) -> CmdResult<
         });
         println!("{}", serde_json::to_string_pretty(&obj).unwrap());
         // JSON callers still get the non-zero EXIT for an unsupported migration (so a CI gate
-        // reads both the body AND the status), matching the human path.
+        // reads both the body AND the status), matching the human path. We already printed the
+        // complete decision object above, so mark the error `json_handled()` — otherwise `main`
+        // would render a SECOND JSON envelope on stdout (the double-print §7 forbids).
         if unsupported {
-            return Err(unsupported_frame(
-                name,
-                declared.unwrap_or(supported),
-                supported,
-            ));
+            return Err(
+                unsupported_frame(name, declared.unwrap_or(supported), supported).json_handled(),
+            );
         }
         return Ok(());
     }

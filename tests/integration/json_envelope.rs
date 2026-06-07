@@ -155,6 +155,59 @@ fn plugin_which_not_found_keeps_single_resolution_object() {
     );
 }
 
+/// `plugin migrate --json` on an UNSUPPORTED (higher) hook_api exits 2 AND prints exactly
+/// ONE JSON object on stdout — the decision object — not the decision object followed by
+/// `main`'s generic error envelope. Regression guard for the merge seam where migrate
+/// printed its own JSON then returned an error `main` re-rendered (the §7 double-print).
+#[cfg(unix)]
+#[test]
+fn plugin_migrate_unsupported_json_is_single_object() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+
+    // A fixture plugin declaring a hook_api NEWER than this build supports.
+    let dir = work.path().join("future-plugin");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("rackabel-future-plugin");
+    std::fs::write(&exe, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let hook = dir.join("hook.sh");
+    std::fs::write(&hook, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.join("rackabel-plugin.toml"),
+        "hook_api = 999\n[hooks]\npost_build = \"hook.sh\"\n",
+    )
+    .unwrap();
+
+    // Install it (not via run_json — install prints human progress to stdout).
+    let install = rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "install", dir.to_str().unwrap(), "--yes"])
+        .output()
+        .expect("spawn install");
+    assert!(
+        install.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+
+    // The migrate call: exit 2, and stdout must parse as a SINGLE JSON value.
+    let v = run_json(
+        home.path(),
+        work.path(),
+        &["--json", "plugin", "migrate", "future-plugin"],
+        2,
+    );
+    assert_eq!(v["decision"], "unsupported");
+    assert_eq!(v["declared_hook_api"], 999);
+    // It is the migrate decision object, NOT the generic error envelope re-rendered on top.
+    assert!(
+        v.get("decision").is_some() && v.get("problem").is_none(),
+        "migrate unsupported failure must be the single decision object, not double-printed"
+    );
+}
+
 /// `validate --json` produces NO ANSI/human checklist glyphs on stdout (the JSON object
 /// is the only thing on stdout — regression guard against a mixed frame).
 #[test]
