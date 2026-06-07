@@ -113,6 +113,62 @@ can be added without changing the build-hash contract.
 
 ---
 
+## 0.2 doctor
+
+### D-11. Developer Mode is reported as inferred/unverified, never asserted (DESIGN §2 / §9.2 / SPEC B §6)
+
+Developer Mode is **not statically readable** from disk in 0.2 (DESIGN §9.2 marks the
+IPC unverified; no ground-truth script reads a prefs file for it). `doctor` therefore
+does **not** claim Developer Mode is on or off. It emits an honest, navigational `[!]`
+row (never a `[✓]`/`[✗]`) carrying the §6.2 "turn on Developer Mode" remedy, and — only
+under `--verbose`/`--json` — a `detail` line stating the limitation explicitly. The
+state is *inferred* behaviorally (running-Live presence + the absence/presence of a
+bare host child), which also drives the SIGHUP-unsafe "a non-rackabel Extension Host is
+running" warning (DESIGN §6.3). The actual flip is detected by `dev`'s poll-until-toggle
+(0.3), not by doctor. Resolves the foundation's "Developer Mode detection is
+behavioral/unverified" deferred item.
+
+### D-12. doctor exits via `process::exit`, not a returned `RkError` (DESIGN §6.1 / §7)
+
+Every other command surfaces a failure as a returned `RkError` that `main` renders with
+the three-part frame. doctor's checklist (or `--json`) **is** its output: a failing
+check is already fully explained inline with its own `help:` line, so returning a framed
+error would print a duplicate frame after the checklist and break the §6.2 transcript.
+doctor instead reads the exit class off the diagnosis (environment=3 when any check
+fails, 0 otherwise — `[!]` warnings never fail) and calls `std::process::exit` after
+flushing stdout. The exit-code taxonomy (§7) is unchanged; only the rendering path
+differs, and it is contained entirely within the doctor command.
+
+### D-13. Quiet-on-success collapses only when *all* checks pass (DESIGN §2)
+
+DESIGN §2 says "passes collapse to a count unless `--verbose`," but the §6.2 happy
+transcript shows every `[✓]` row alongside the `[!]` ones. rackabel reconciles this:
+when the run is all-green (no warnings/failures/blocked) the default view collapses to
+just the tail count; as soon as there's anything to act on, the **full** checklist
+(passing rows included) shows so each `[!]`/`[✗]` has context — matching the transcript.
+`--verbose` always shows every row plus the internal `detail` lines.
+
+### D-14. Native-dep "compiled" check is a doctor-local walk, not `native_dep::audit` (SPEC C §3.8)
+
+The frozen `native_dep::audit` service body lands with `deploy` (it is a stub that
+errors in 0.2). To avoid coupling the doctor row to that stub, doctor does its own
+read-only, best-effort `.node`-presence walk over `<project>/node_modules/<dep>` for
+each declared `native_deps` (using the same "don't descend into nested node_modules"
+rule as SPEC B's `hasNativeBinary`). When `deploy` lands its `audit`, doctor can be
+re-pointed at it; the user-facing remedy ("run `rackabel deploy --fix`") is identical.
+
+### D-15. Process-state probes have a test seam (SPEC C §5 testability contract)
+
+Live-running and bare-host detection use `pgrep` (macOS), which is inherently
+machine-dependent. To honor the testability contract (tests never depend on real
+machine state), doctor reads two `0`/`1` probe-override env vars —
+`RACKABEL_DOCTOR_LIVE_RUNNING` and `RACKABEL_DOCTOR_BARE_HOST` — that pin those probes
+deterministically in tests. These are doctor-internal probe overrides, distinct from the
+Ctx-routed `ABLETON_*` resolution overrides, and have no effect when unset (real `pgrep`
+behavior on a user's machine).
+
+---
+
 ## Deferred (to be recorded by the owning command branch when it lands)
 
 These are flagged in the specs as likely deviations but belong to a command body the
@@ -127,8 +183,7 @@ foundation only stubs; the owning branch records the final decision here.
   Arclight `<slug>-v<version>[-os-arch].zip` layouts, and the dropped/ generalized
   lidal `lidal.openEditor` sentinel.
 - **Developer Mode detection is behavioral/unverified** (DESIGN §9.2 / SPEC B §6).
-  Dev Mode is not statically readable; the doctor-owner records the inferred
-  (running-Live + host-child presence) approach when `doctor` lands.
+  RESOLVED by the doctor branch — see D-11 above.
 - **`extra_dist_files` copied on deploy** (SPEC B §3). The shared `deploy-extension.js`
   helper does not copy extra dist files; rackabel unifies this with pack. The
   deploy-owner records the final behavior.
