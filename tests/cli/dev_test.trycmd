@@ -1,0 +1,17 @@
+The `dev test` (§3.8) human output for the deterministic, no-build paths. The CI entry
+point never needs Live, Developer Mode, a daemon, or a GUI, and it never prompts. The
+real build + runner paths (which need a node that can bundle esbuild) are covered by the
+integration tests; here we pin the human error shapes that reproduce on any machine.
+
+An operand that is neither a registered extension name nor a project path is `RK0001`
+with the "register it, or pass a path" remedy — non-interactive, no prompt.
+
+```
+$ rackabel dev test does-not-exist
+? 3
+error: `does-not-exist` is not a registered extension or a project path [RK0001]
+  --> does-not-exist
+  help: register it (`rackabel dev register <path>`), or pass a path to a project directory that contains a rackabel.toml
+(run `rackabel explain RK0001` for details)
+
+```

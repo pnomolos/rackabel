@@ -90,6 +90,8 @@ pub enum ErrorCode {
     ReloadActivateFailed,
     /// The node host module failed to spawn (bad node / host module path).
     HostLaunchFailed,
+    /// `dev test` had one or more targets with failing tests (the §3.8 CI entry point).
+    TestFailed,
     // -- validation (exit 4) --
     /// Manifest incomplete (missing name/author/entry/version/minimumApiVersion).
     ManifestIncomplete,
@@ -134,6 +136,7 @@ impl ErrorCode {
             Self::PackFailed => "RK1305",
             Self::ReloadActivateFailed => "RK1306",
             Self::HostLaunchFailed => "RK1307",
+            Self::TestFailed => "RK1308",
             Self::ManifestIncomplete => "RK4001",
             Self::ApiVersionTooHigh => "RK4002",
             Self::VersionNotBumped => "RK4003",
@@ -179,7 +182,8 @@ impl ErrorCode {
             | Self::DeployCopyFailed
             | Self::PackFailed
             | Self::ReloadActivateFailed
-            | Self::HostLaunchFailed => ExitClass::BuildRuntime,
+            | Self::HostLaunchFailed
+            | Self::TestFailed => ExitClass::BuildRuntime,
             Self::ManifestIncomplete
             | Self::ApiVersionTooHigh
             | Self::VersionNotBumped
@@ -216,6 +220,7 @@ impl ErrorCode {
         Self::PackFailed,
         Self::ReloadActivateFailed,
         Self::HostLaunchFailed,
+        Self::TestFailed,
         Self::ManifestIncomplete,
         Self::ApiVersionTooHigh,
         Self::VersionNotBumped,

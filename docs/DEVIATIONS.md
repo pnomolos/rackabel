@@ -733,3 +733,43 @@ basename against existing names and reserved verbs (parent-prefixed, echoed). A 
 equal to a reserved dev verb is still *forced* with a warning (stored verbatim, reachable
 only via `--only`/`--`), via the new `Registry::add_named` (extends, does not reshape, the
 foundation model).
+
+### D-59. `dev test` adds the `RK1308 TestFailed` error code (DESIGN §3.8, §7)
+
+SPEC D §3 enumerates the new `RKxxxx` codes the foundation lands but does not include a
+code for a `dev test` test *failure* — only `RK1306 ReloadActivateFailed` (an
+`activate()` throw on a host reload) and the daemon/host environment codes exist in the
+build/runtime class. The §3.8 CI entry point needs its own honest code: a failing
+headless test run is a build/runtime failure (exit 1, §7 taxonomy) but is semantically
+distinct from a reload `activate()` throw, and the engineering bar requires a three-part
+frame + `explain` entry per expected failure. The dev-test agent therefore adds
+`ErrorCode::TestFailed` (`RK1308`, BuildRuntime/exit 1) to `src/error.rs` (variant +
+`as_str`/`class`/`ALL` arms) and its `short_title`/`long_form` prose to
+`src/commands/explain.rs`. No other error code changes; the addition is purely additive
+(every prior code keeps its string + class). The integrator should fold this into the
+foundation error table.
+
+### D-60. `dev test` gags the 0.2 build's stdout under `--json` instead of adding a `BuildOptions` field
+
+DESIGN §3.8 requires `dev test --json` to emit a clean wrapper envelope as the SOLE
+contents of stdout (a CI script reading `dev test --json` must always get one parseable
+object). The reused 0.2 `esbuild::build_extension` prints its own banner/JSON line to
+stdout via `report_success` keyed on `ctx.json`, which would pollute the envelope. Rather
+than add a `quiet` field to `BuildOptions` — which would force edits to every existing
+struct-literal constructor across build/pack/deploy (other agents' 0.2 files) — the
+dev-test agent wraps the build call in a scoped `StdoutGag` that redirects the process's
+stdout fd to `/dev/null` for the build's duration and restores it on drop (unix-only;
+the whole `dev` module is `#[cfg(unix)]`). This is fully self-contained in
+`test_cmd.rs`. In HUMAN mode no gag is applied, so the build banner prints inline as
+§3.8 specifies ("build … (banner)").
+
+### D-61. Foundation `dev test` stub tests updated to the real routing/behavior
+
+The foundation landed two tests encoding the `dev test` STUB output (exit 1 / `RK1306`):
+`tests/cli/dev_surface.trycmd`'s `dev test` block and
+`tests/integration/dev.rs::dev_verb_wins_over_name`. With the real `dev test`, an empty
+cwd/registry yields `RK0001` (nothing to test, exit 3) — still proving the verb routed
+to the test runner (NOT the bare loop's `RK0307`). Both tests were updated to assert the
+real contract (`RK0001` present, `RK0307` absent). The name-vs-verb routing guarantee is
+preserved; only the stub's placeholder code/exit changed. `tests/cli/explain.trycmd`'s
+valid-codes list gained `RK1308`.

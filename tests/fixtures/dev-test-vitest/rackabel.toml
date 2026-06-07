@@ -1,0 +1,6 @@
+# A Live Extension fixture with a vitest-style `test` script for the `dev test` (§3.8)
+# integration tests. The test script is a tiny dependency-free node stub that emits a
+# vitest-shaped summary and exits 0 (pass) or 1 (fail) based on RK_TEST_OUTCOME, so the
+# tests never need a real vitest network install.
+[extension]
+name = "Vitest Fixture"

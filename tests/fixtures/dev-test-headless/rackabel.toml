@@ -1,0 +1,5 @@
+# A Live Extension fixture with only a project-defined `*:headless` runner script (no
+# vitest `test`), exercising the §3.8 second-precedence path: `dev test` shells out to
+# the headless script. The script is a dependency-free node stub (no network install).
+[extension]
+name = "Headless Fixture"
