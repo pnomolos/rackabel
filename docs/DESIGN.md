@@ -1736,10 +1736,26 @@ Honest unresolved decisions, with the tradeoff each one bounds.
    primitive? *Bounds:* whether 0.6 per-extension reload is possible or whether debounced
    whole-host reload is the permanent ceiling. We ship whole-host reload now and gate
    per-extension on this answer.
+   **ANSWERED (empirically, 2026-06-07, 0.3 recon).** The host *does* contain
+   single-extension `loadExtension`/`unloadExtension` command handlers (verified via
+   strings in `ExtensionHostNodeModule.node`, incl. their error messages) — but they are
+   commands **Live sends to the host** over its private `exthost-ctrl-ipc-channel` Unix
+   socket, not anything the public dev entrypoint exposes. `require(EH_MOD)` exports only
+   `initialize`/`initializeExtensionHost`, which take the full list once at startup. So
+   granular reload exists in the host but is reachable only by speaking Live's private
+   control protocol; the supported dev primitive remains whole-host restart. 0.6
+   per-extension reload stays gated on Ableton exposing this publicly.
 
 2. **Reload when Developer Mode is off.** When Live runs the host itself, what IPC/signal
    (if any) lets a tool trigger a reload? *Bounds:* whether `rackabel dev` can ever work
    without owning the wrapper. Current stance: it cannot; doctor says so.
+   **NARROWED (2026-06-07, 0.3 recon).** Live and the host speak over a private
+   `exthost-ctrl-ipc-channel` Unix socket (in `DARWIN_USER_TEMP_DIR`), which carries
+   `loadExtension`/`unloadExtension` commands (§9.1) — so a reload channel *exists* but is
+   Live's private protocol, unsupported for tools. Stance unchanged. Bonus: Developer Mode
+   has **no reliable on-disk boolean** (binary `Preferences.cfg` blob); the shipped
+   detection heuristic is process-shape-based — Live running + no Live-spawned host child
+   (PPID discrimination) ⇒ Dev Mode ON.
 
 3. **Windows/Linux host management.** Host *location* on Windows is **not** open — the
    official CLI's `resolveExtensionHostDir` already encodes it (`.exe` sibling
@@ -1777,10 +1793,29 @@ Honest unresolved decisions, with the tradeoff each one bounds.
    `validate`/`doctor` gate on it — so abort-all is prevented and drop-one is made explicit. The
    residual cosmetic unknown (error text / Live banner) is design-irrelevant. *To verify:* run
    the host with one over-floor manifest among valid ones; observe whether the valid ones load.
+   **ANSWERED (empirically, 2026-06-07, 0.3 recon): ABORT-ALL, confirmed.** The host
+   negotiates one `hostApiVersion` (1.0.0) with Live; an extension whose
+   `minimumApiVersion` exceeds it throws `Error: Incompatible API version` as an
+   `uncaughtException` during activation and the **entire host process exits with code 1**,
+   taking every sibling down. Evidence: this machine's own `ExtensionHost.txt` records a
+   real session (extension `moisesai.moisesai`) with exactly that uncaught exception
+   followed by `Process is exiting with code: 1`; the host module's strings corroborate
+   (`Incompatible API version`, `hostApiVersion`, `Missing required field:
+   minimumApiVersion`). The §3.2 pre-filter is therefore **mandatory**, not defensive —
+   and it shipped in 0.3 (verified live: an over-floor extension shows `Skipped:` while
+   siblings load).
 
 7. **Storage/temp dirs under Live's own host.** When Live (not the dev launcher) runs the
    host, what `storageDirectory`/`tempDirectory` does it assign? *Bounds:* whether dev
    state carries over to production. We mirror the launcher's layout and flag the risk.
+   **PARTIALLY ANSWERED (empirically, 2026-06-07, 0.3 recon).** Live-managed extensions
+   install under `~/Library/Application Support/Ableton/Extensions/<id>/` (namespaced ids,
+   e.g. `phil-schalm.livewire`) and get `storageDirectory` under
+   `~/Library/Application Support/Ableton/Extension Data/<id>/` — the **same Extension
+   Data base the dev convention uses**, so dev storage carries over when the slug matches
+   the id. The exact `tempDirectory` Live passes remains unverified (requires a
+   Dev-Mode-OFF session; the host module reads a `TEMPDIR` env hint, suggesting Live sets
+   it). Residual risk narrowed to temp-dir mismatch only.
 
 8. **Native-binary policy.** Does Live re-validate/re-sign `.node` files or apply any
    policy that could reject a packed `node_modules`? *Bounds:* whether `pack`'s native
