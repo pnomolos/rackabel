@@ -204,16 +204,23 @@ fn run_wizard(args: &NewArgs, ctx: &Ctx) -> CmdResult<Wizard> {
         .as_deref()
         .and_then(|n| answers::load(ctx, &dir_name_of(n)));
 
+    // `--yes` means "accept defaults" (D-3): like `--no-input` it never prompts for a
+    // field that has a default, but unlike `--no-input` it is not a hard non-interactive
+    // contract — it just takes the bracketed default. `ui::prompt::text` only auto-accepts
+    // under `ctx.no_input`, so for the accept-defaults case we resolve the default here and
+    // only reach an interactive prompt when neither `--yes` nor `--no-input` is set.
+    let accept_defaults = args.yes || ctx.no_input;
+
     // -- name --
     let name = match &args.name {
         Some(n) => n.clone(),
         None => {
-            // The name has no inferable default. Under --no-input there is nothing to
-            // prompt for and nothing to invent, so this becomes a deterministic usage
-            // error naming the positional argument (not a generic "pass it as a flag",
+            // The name has no inferable default. Under --no-input (or --yes) there is
+            // nothing to prompt for and nothing to invent, so this becomes a deterministic
+            // usage error naming the positional argument (not a generic "pass it as a flag",
             // since the name is positional) — unless a remembered answer supplies one.
             let default = remembered.as_ref().and_then(|r| r.name.clone());
-            if ctx.no_input && default.is_none() {
+            if accept_defaults && default.is_none() {
                 return Err(RkError::new(
                     ErrorCode::ManifestIncomplete,
                     ExitClass::Usage,
@@ -230,21 +237,29 @@ fn run_wizard(args: &NewArgs, ctx: &Ctx) -> CmdResult<Wizard> {
     // -- author -- default: remembered → git config → empty. Author is never a hard
     // requirement (UX rule 1: infer-and-echo, never hard-fail on a missing field) — an
     // unknown author is left empty and surfaces later in `validate` (RK4001), exactly
-    // like `resolved_extension`'s inference. So under --no-input we fall back to "" (a
-    // present default) rather than erroring, while interactive still prompts.
+    // like `resolved_extension`'s inference. So when accepting defaults we fall back to
+    // the resolved default (git config, else "") rather than prompting.
     let author_default = remembered
         .as_ref()
         .and_then(|r| r.author.clone())
         .or_else(crate::manifest::infer::infer_author_from_git)
         .unwrap_or_default();
-    let author = ui::prompt::text("Author", Some(&author_default), ctx)?;
+    let author = if accept_defaults {
+        author_default
+    } else {
+        ui::prompt::text("Author", Some(&author_default), ctx)?
+    };
 
     // -- license -- default: remembered → MIT.
     let license_default = remembered
         .as_ref()
         .and_then(|r| r.license.clone())
         .unwrap_or_else(|| DEFAULT_LICENSE.to_string());
-    let license = ui::prompt::text("License", Some(&license_default), ctx)?;
+    let license = if accept_defaults {
+        license_default
+    } else {
+        ui::prompt::text("License", Some(&license_default), ctx)?
+    };
 
     // -- template -- one choice in 0.2; --template (local path) overrides the label.
     let template = args

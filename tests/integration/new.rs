@@ -151,7 +151,7 @@ fn happy_path_with_fixture_toolkit_scaffolds_rackabel_form() {
     let ext = std::fs::read_to_string(proj.join("src/extension.ts")).unwrap();
     assert!(ext.contains("registerCommand"));
     assert!(ext.contains("registerContextMenuAction"));
-    assert!(ext.contains("Rename selected clips"));
+    assert!(ext.contains("Rename this clip"));
 }
 
 /// `--minimal` emits a bare skeleton (no working example) and, being minimal, does NOT

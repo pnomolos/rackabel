@@ -553,7 +553,12 @@ fn run_node(
     cwd: &Path,
 ) -> CmdResult<crate::services::proc::Captured> {
     let bin = runtime.bin.to_string_lossy().into_owned();
-    let mut full: Vec<&str> = vec!["-e", script];
+    // `node -e "<script>" a b` puts `a` at `process.argv[1]`, not `[2]` (there is no
+    // script-file path entry the way there is for `node file.js a`). The driver scripts
+    // read their first real argument as `process.argv[2]` (the conventional index), so we
+    // insert a placeholder positional to line the indices up. Without it the first real
+    // argument lands at `[1]` and the driver reads `undefined` at `[2]`.
+    let mut full: Vec<&str> = vec!["-e", script, "rackabel-driver"];
     full.extend_from_slice(args);
     crate::services::proc::capture(
         &bin,

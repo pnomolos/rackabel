@@ -1266,7 +1266,14 @@ fn resolve_user_library_quiet(
     project: Option<&Project>,
     ctx: &Ctx,
 ) -> CmdResult<user_library::UserLibrary> {
-    user_library::resolve(project, &quiet_ctx(ctx))
+    // doctor is a diagnostic — it must never prompt. When several User Libraries exist,
+    // the resolver's interactive branch would call `ui::prompt::select`, which fails on a
+    // non-TTY (and would be wrong for a checklist anyway). Force the non-interactive
+    // resolution path (newest-wins, deterministic) so doctor reports a concrete library
+    // instead of a spurious "couldn't find it" prompt error.
+    let mut q = quiet_ctx(ctx);
+    q.no_input = true;
+    user_library::resolve(project, &q)
 }
 
 #[cfg(test)]

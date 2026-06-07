@@ -334,31 +334,37 @@ export function activate(activation: ActivationContext) {{
     }
 
     // Default: a working command + an AudioClip right-click action that renames the
-    // selected clips. Adapted from the create-extension starter (SPEC A §3.5), kept to
-    // pure-JS deps only (no HTML/UI import, so no vite devDep).
+    // clip the action was triggered on. Adapted from the create-extension starter
+    // (SPEC A §3.5), kept to pure-JS deps only (no HTML/UI import, so no vite devDep).
+    // The command body uses only verified SDK API: a context-menu action on the
+    // `AudioClip` scope passes the triggered object's `Handle` as the callback's first
+    // argument, which `getObjectFromHandle` resolves into a typed `AudioClip`.
     format!(
         "\
-import {{ initialize, type ActivationContext }} from \"@ableton-extensions/sdk\";
+import {{
+  initialize,
+  AudioClip,
+  type ActivationContext,
+  type Handle,
+}} from \"@ableton-extensions/sdk\";
 
 export function activate(activation: ActivationContext) {{
   const context = initialize(activation, \"{api}\");
 
-  // One command: rename the clips the user has selected. Commands are registered in
-  // code (the SDK has no manifest-declared commands).
-  context.commands.registerCommand(\"{id}.renameSelectedClips\", () => {{
-    const song = context.application.song;
-    let n = 1;
-    for (const clip of song.view.selectedClips ?? []) {{
-      clip.name = `Renamed ${{n++}}`;
-    }}
-    console.log(`{name}: renamed ${{n - 1}} clip(s).`);
+  // One command: rename the audio clip the right-click action was triggered on.
+  // Commands are registered in code (the SDK has no manifest-declared commands); the
+  // callback receives the triggered object's Handle as its first argument.
+  context.commands.registerCommand(\"{id}.renameClip\", (...args: unknown[]) => {{
+    const clip = context.getObjectFromHandle(args[0] as Handle, AudioClip);
+    clip.name = `${{clip.name}} (renamed)`;
+    console.log(`{name}: renamed clip to ${{clip.name}}`);
   }});
 
   // One right-click action wired to that command, on the AudioClip scope.
   context.ui.registerContextMenuAction(
     \"AudioClip\",
-    \"Rename selected clips\",
-    \"{id}.renameSelectedClips\",
+    \"Rename this clip\",
+    \"{id}.renameClip\",
   );
 }}
 ",
@@ -461,9 +467,9 @@ mod tests {
         let tmp = tempdir().unwrap();
         render(tmp.path(), &sample(false)).unwrap();
         let ext = std::fs::read_to_string(tmp.path().join("src/extension.ts")).unwrap();
-        assert!(ext.contains("registerCommand(\"clip-renamer.renameSelectedClips\""));
+        assert!(ext.contains("registerCommand(\"clip-renamer.renameClip\""));
         assert!(ext.contains("registerContextMenuAction("));
-        assert!(ext.contains("\"Rename selected clips\""));
+        assert!(ext.contains("\"Rename this clip\""));
         // pure-JS only: no HTML import / UI.
         assert!(!ext.contains("interface.html"));
     }
