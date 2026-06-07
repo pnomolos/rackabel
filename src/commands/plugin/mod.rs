@@ -18,6 +18,7 @@ pub mod enable;
 pub mod external;
 pub mod install;
 pub mod list;
+pub mod migrate;
 pub mod run;
 pub mod search;
 pub mod which;
@@ -36,5 +37,6 @@ pub fn run(args: &PluginArgs, ctx: &Ctx) -> CmdResult<()> {
         PluginCommand::Enable(a) => enable::run(a, ctx),
         PluginCommand::Disable(a) => disable::run(a, ctx),
         PluginCommand::Search(a) => search::run(a, ctx),
+        PluginCommand::Migrate(a) => migrate::run(a, ctx),
     }
 }

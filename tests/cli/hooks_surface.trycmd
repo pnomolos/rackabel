@@ -1,0 +1,82 @@
+The lifecycle-hook verbs' user-facing surface (DESIGN §5.3/§5.7): the `plugin enable`
+CONSENT gate (enabling a hook plugin prints what hooks run at which lifecycle points and
+requires confirmation), and the `plugin migrate` SURFACE. Hermetic: a fixture hook plugin
+is sideloaded from this case's `.in` dir (a `rackabel-notarize` + `rackabel-plugin.toml`
+declaring `pre_deploy`/`doctor_check`), so nothing touches the network or a real Live.
+RACKABEL_HOME is pinned inline to `rk-home-hooks` (inside this case's run cwd) so its state
+is isolated from every other transcript regardless of case order; the harness wipes it
+before each run.
+
+Sideloading the fixture installs it DISABLED — a hook plugin installs un-consented (the
+§5.7 consent gate). The install note points at `plugin enable` to consent.
+
+```
+$ RACKABEL_HOME=rk-home-hooks rackabel plugin install notarize-src --yes
+[✓] installing plugin `notarize` from notarize-src (sideload): copying into [..] and linking [..]
+[✓] installed `notarize` (sha256 [..]) -> [..]rackabel-notarize
+    help: carries a rackabel-plugin.toml with 2 hook(s) — disabled until you run `rackabel plugin enable notarize` to consent (enabling runs its hooks)
+
+```
+
+`plugin enable` is the consent gate (§5.7): it prints exactly which hooks will run at which
+lifecycle points BEFORE flipping the flag. Under `--no-input` it REFUSES (no implicit
+consent for running third-party code) with RK0403 — the plugin stays disabled, no hook runs.
+
+```
+$ RACKABEL_HOME=rk-home-hooks rackabel plugin enable notarize --no-input
+? 3
+[!] enabling `notarize` consents to running its third-party hook code at these lifecycle points (it runs with your full privileges, §5.7):
+      - pre_deploy (before every deploy — can VETO the deploy)
+      - doctor_check (adds a row to `rackabel doctor`)
+error: enabling `notarize` runs its third-party hooks and was not confirmed [RK0403]
+  help: pass --yes to consent (e.g. in a script), or run without --no-input to confirm interactively. The plugin stays disabled until you do; no hook runs.
+(run `rackabel explain RK0403` for details)
+
+```
+
+`--yes` scripts the consent: the same transcript of hooks + lifecycle points, then the
+plugin is enabled.
+
+```
+$ RACKABEL_HOME=rk-home-hooks rackabel plugin enable notarize --yes
+[!] enabling `notarize` consents to running its third-party hook code at these lifecycle points (it runs with your full privileges, §5.7):
+      - pre_deploy (before every deploy — can VETO the deploy)
+      - doctor_check (adds a row to `rackabel doctor`)
+[✓] enabled `notarize`
+    help: its lifecycle hooks now run at their lifecycle points (you consented above)
+
+```
+
+`plugin migrate` ships the SURFACE: today `hook_api = 1` is the only contract, so a plugin
+targeting it reports "nothing to migrate" (exit 0).
+
+```
+$ RACKABEL_HOME=rk-home-hooks rackabel plugin migrate notarize
+[✓] `notarize`: nothing to migrate (declares hook_api 1; this build supports 1)
+
+```
+
+`--json` carries the detected vs supported versions + the decision (machine-readable, §7).
+
+```
+$ RACKABEL_HOME=rk-home-hooks rackabel plugin migrate notarize --json
+{
+  "decision": "nothing-to-migrate",
+  "declared_hook_api": 1,
+  "plugin": "notarize",
+  "supported_hook_api": 1
+}
+
+```
+
+`plugin migrate` on a name that isn't installed is the same RK0401 environment error as the
+other plugin verbs.
+
+```
+$ RACKABEL_HOME=rk-home-hooks rackabel plugin migrate ghost
+? 3
+error: no plugin named `ghost` is installed [RK0401]
+  help: run `rackabel plugin list`, or `rackabel plugin install OWNER/REPO`
+(run `rackabel explain RK0401` for details)
+
+```

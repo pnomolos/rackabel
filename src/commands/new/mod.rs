@@ -101,6 +101,20 @@ fn new_extension(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
         return new_from_template(tref, args, ctx);
     }
 
+    // new_template ENUMERATE hooks (DESIGN §5.3): BEFORE the wizard's template prompt, every
+    // ENABLED plugin (and project-local [hooks]) declaring `new_template` is run with `{kind}`
+    // ONLY and may contribute a CHOICE to the wizard's template list. An installed-but-
+    // unenabled plugin contributes nothing (the §5.7 consent gate). The hooks run once; if a
+    // contributed choice is picked, it renders through ordinary tier-1 machinery (no second
+    // call). We only OFFER a pick-list when there is something to pick AND we can prompt; under
+    // --no-input/--yes there is no interactive choice, so the built-in default path runs.
+    if !ctx.no_input
+        && !args.yes
+        && let Some(tref) = maybe_pick_template_hook(args, ctx)?
+    {
+        return new_from_template(&tref, args, ctx);
+    }
+
     // 1. The wizard — flag-driven, prompt-filled, --no-input-safe. Defaults are seeded
     //    from any remembered answers (the SDK-not-found re-run path).
     let wiz = run_wizard(args, ctx)?;
@@ -185,6 +199,70 @@ fn new_extension(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     maybe_auto_build(&root, &wiz.dir_name, ctx);
 
     Ok(())
+}
+
+/// Run the `new_template` enumerate hooks (§5.3) and, if any contributed a choice, offer a
+/// numbered pick-list (Default + each hook template). Returns the picked template ref/path
+/// when the user chose a hook-contributed template, or `None` to fall through to the built-in
+/// default path (the user picked Default, or no hook contributed a choice). Enumerate hooks
+/// honor the same enable gate as every other hook (an unenabled plugin offers nothing).
+fn maybe_pick_template_hook(args: &NewArgs, ctx: &Ctx) -> CmdResult<Option<String>> {
+    // The kind passed to the hook is the scaffold kind: this path is the Extension wizard.
+    let _ = args;
+    let (choices, omitted) = crate::hooks::run::new_template_choices(ctx, "extension")?;
+
+    // A hook that ran but produced no usable choice (empty/nonzero/timeout) is logged once,
+    // honestly, without derailing the wizard (§5.3 "the choice is omitted, logged").
+    if ctx.echo_on() {
+        for label in &omitted {
+            ui::frame::note(
+                &format!("{label}'s new_template hook contributed no template (skipped)"),
+                ctx,
+            );
+        }
+    }
+
+    if choices.is_empty() {
+        return Ok(None);
+    }
+
+    // Build the pick-list: index 0 is always the built-in default; each hook choice follows
+    // in discovery order (enabled plugins in lock order), labeled by its source.
+    let mut options = vec!["Default (a working right-click action)".to_string()];
+    for c in &choices {
+        options.push(format!(
+            "{} — {}",
+            c.source_label,
+            template_choice_label(&c.choice)
+        ));
+    }
+    let idx = ui::prompt::select("Choose a template", &options, ctx)?;
+    if idx == 0 {
+        return Ok(None); // Default → the built-in happy path.
+    }
+    // A hook-contributed choice renders through ordinary tier-1 machinery (no second hook
+    // call) — convert the classified choice back to the ref/path string `new_from_template`
+    // resolves.
+    let picked = &choices[idx - 1].choice;
+    Ok(Some(template_choice_ref(picked)))
+}
+
+/// A short human label for a contributed template choice (for the pick-list line).
+fn template_choice_label(choice: &crate::hooks::outcome::TemplateChoice) -> String {
+    use crate::hooks::outcome::TemplateChoice;
+    match choice {
+        TemplateChoice::Ref(r) => r.clone(),
+        TemplateChoice::Path(p) => p.display().to_string(),
+    }
+}
+
+/// The ref/path string `new_from_template` resolves for a contributed choice.
+fn template_choice_ref(choice: &crate::hooks::outcome::TemplateChoice) -> String {
+    use crate::hooks::outcome::TemplateChoice;
+    match choice {
+        TemplateChoice::Ref(r) => r.clone(),
+        TemplateChoice::Path(p) => p.display().to_string(),
+    }
 }
 
 /// Scaffold from a tier-1 `--template` (§5.5). The directory name comes from the

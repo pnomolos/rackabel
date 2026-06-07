@@ -1437,3 +1437,60 @@ This is faithful to the host model (a single respawn served them all) and keeps 
 `name` a hook can key on. A reload that errored at the IPC layer (never completed) fires NO
 `on_reload`. `post_build` is NOT fired inside the watch chain when build-if-stale SKIPS esbuild
 (no build ran ⇒ no post_build) — it fires only on an actual build, with `bundle_path` present.
+
+### D-107. A `hooks::run` module wraps the engine for the enumerate verbs (`doctor_check`/`new_template`) (DESIGN §5.3/§5.7, milestone 0.5, HOOK-VERBS)
+
+INTEGRATOR NOTE: two feature branches independently landed a full `hooks::engine::run_hook`
+BODY (this milestone's HOOK-ENGINE and HOOK-VERBS agents). At merge the integrator kept the
+HOOK-ENGINE body (D-104 — the process-group `setpgid`/`killpg` reaping with the `ps`-asserted
+no-orphan guarantee and the non-Unix `RK1309` frame) as the single implementation. The two
+bodies implemented the same §5.3 contract through the same frozen signature, so the HOOK-VERBS
+consumers (`hooks::run`) bind to the surviving body unchanged. The description below documents
+that reconciled body for completeness.
+
+`hooks::engine::run_hook` is no longer a stub: it spawns the resolved command with the FULL
+§5.2 env contract PLUS `RACKABEL_HOOK_API=1`, writes EXACTLY one JSON payload object to the
+child's stdin on a detached writer thread then closes it (EOF framing — a hook reading to EOF
+terminates; one blocking for more input hits the timeout), drains stdout/stderr on reader
+threads (no full-pipe deadlock), and enforces the per-hook wall-clock timeout via a wait-thread
++ `recv_timeout`: on overrun it sends SIGTERM, waits the 5s grace, then SIGKILL, and REAPS the
+child itself (no orphan) — a hanging hook is bounded by the timeout machinery (asserted by an
+integration test that sleeps 30s under a 400ms budget and returns in well under 20s). The
+`(stdout, exit_code, timed_out)` triple maps to a `HookOutcome` per the §5.3 row (informational
+swallow / the one `pre_deploy` veto / `doctor_check` a-d via `DoctorLine::resolve` / the
+`new_template` choice); a timeout synthesizes exit 124 but `timed_out` is the authoritative
+signal (= combination d). The signature (D-101) is unchanged. A NEW `hooks::run` module
+(HOOK-VERBS-owned, added under the foundation-owned `hooks/`) wraps discovery + engine for the
+two enumerate verbs this agent owns — `doctor_check_rows` and `new_template_choices` — building
+the §5.3 stdin payloads (omitted-not-empty; `manifest_toml` re-read + parsed from the project's
+`rackabel.toml`) and folding a spawn failure / non-matching outcome into a row/omission rather
+than a fatal command error (these hooks never abort their phase). **Integrator note:** the
+`pre_deploy`/`post_build`/`on_reload` CALL SITES (build/deploy/dev) are NOT wired by this agent
+— `run_hook` now works for them, but their invocation belongs to the build/deploy/dev agent.
+
+### D-108. The CLI gains `plugin migrate` + a dedicated `PluginEnableArgs`/`PluginMigrateArgs` (DESIGN §2/§5.3/§5.7, milestone 0.5)
+
+The 0.4 `cli.rs` was "frozen" and its comment called `plugin migrate` "deliberately absent."
+0.5 lands the verb (D-100), so `cli.rs` gains `PluginCommand::Migrate(PluginMigrateArgs)` and
+the `migrate` synopsis comment is updated. `plugin enable` moves from the shared
+`PluginNameArgs` to a dedicated `PluginEnableArgs { name, --yes }` because enabling a hook
+plugin is the §5.7 CONSENT gate and needs a scriptable `--yes` (consent in CI) that
+`disable`/`which` do not. `disable` keeps `PluginNameArgs`. The reserved-namespace tests are
+unaffected (`migrate` is a `plugin` SUBverb, not a top-level token).
+
+### D-109. `plugin enable` becomes the hook-consent gate; a declined consent reuses RK0403; a pin change auto-disables with a re-enable prompt (DESIGN §5.7)
+
+Enabling a plugin that carries RUNNABLE hooks now prints exactly which hooks run at which
+lifecycle points (with the on-every-save implication for `post_build`/`on_reload` under `dev`)
+and REQUIRES consent before flipping the `enabled` flag: `--yes` scripts it, `--no-input` (and
+bare `--json`, which can't carry an interactive decision) REFUSE with `RK0403` (the same
+declined-consent code D-90 reuses for a declined install — enabling unreviewed hook EXECUTION
+that was not confirmed; nothing is enabled, no hook runs), and an interactive run is a y/N
+defaulting to NO. A plain (no-manifest) plugin or a manifest with no string-command hook this
+build understands needs no consent — `enable` flips the dispatch-gate flag directly (the 0.4
+behavior). The §5.7 PIN-CHANGE auto-disable already lives in `store.rs` (a code change on
+reinstall sets `enabled = false` for a hook plugin); this agent makes the install report
+EXPLICIT about it — a reinstall whose code changed prints "its code changed, so it was DISABLED
+— run `rackabel plugin enable <name>` to re-consent" (new code never runs on-save under consent
+given for the old code). `store.rs` is the one PLUGIN-MGMT-owned file this agent edits (a single
+report-wording change in `report_installed`); flagged for the integrator.

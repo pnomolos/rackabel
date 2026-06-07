@@ -245,7 +245,75 @@ pub fn diagnose(project: Option<&Project>, ctx: &Ctx) -> Diagnosis {
     // --- Max + Max for Live (existing M4L device path) ---
     check_max(&mut diag);
 
+    // --- doctor_check lifecycle hooks (DESIGN §5.3) ---
+    // Every ENABLED plugin (and a project-local [hooks]) that declares `doctor_check`
+    // contributes a row, rendered here in the standard checklist with the plugin name. The
+    // stdout-line-wins a-d precedence is applied in the engine; a hook that crashes/times out
+    // is a generic fail row, never a `doctor` abort.
+    check_plugin_doctor_hooks(&mut diag, project, ctx);
+
     diag
+}
+
+/// Run every discovered, enabled `doctor_check` hook and fold each into a checklist row
+/// (DESIGN §5.3). Project-local hooks (implicit trust) come first, then enabled plugins in
+/// lock order — exactly the discovery resolver's order. Outside a project the stdin payload's
+/// `project_dir`/`manifest_toml` are absent (the hook must tolerate that).
+fn check_plugin_doctor_hooks(diag: &mut Diagnosis, project: Option<&Project>, ctx: &Ctx) {
+    use crate::hooks::manifest::HooksTable;
+    use crate::hooks::outcome::{DoctorResolution, DoctorSymbol};
+
+    // The discovery resolver takes the project root + its parsed [hooks] table (project-local
+    // hooks) plus the lock's enabled plugins. A device project's [hooks] table is honored too.
+    let proj_source: Option<(&Path, &HooksTable)> =
+        project.and_then(|p| p.hooks_table().map(|t| (p.root.as_path(), t)));
+
+    let rows = match crate::hooks::run::doctor_check_rows(ctx, proj_source) {
+        Ok(rows) => rows,
+        // A discovery/lock read hiccup must not crash `doctor` (a diagnostic) — surface a
+        // single note row instead, then carry on with the built-in summary.
+        Err(_) => return,
+    };
+
+    for row in rows {
+        // The row id is stable + machine-friendly for `--json`: `hook.<plugin>` /
+        // `hook.project`. The displayed message attributes the row to its source.
+        let id: &'static str = "hook.doctor_check";
+        let who = &row.source_label; // e.g. "plugin notarize" / "project"
+        let check = match row.resolution {
+            DoctorResolution::Line(line) => {
+                let status = match line.symbol {
+                    DoctorSymbol::Ok => CheckStatus::Ok,
+                    DoctorSymbol::Warn => CheckStatus::Warn,
+                    DoctorSymbol::Fail => CheckStatus::Fail,
+                };
+                let mut c = Check::new(id, status, format!("{} — {}", who, line.message));
+                if let Some(help) = line.help {
+                    c = c.with_help(help);
+                }
+                c
+            }
+            DoctorResolution::Pass => {
+                Check::new(id, CheckStatus::Ok, format!("{who} — doctor_check passed"))
+            }
+            DoctorResolution::GenericFail => {
+                // Combination (d): nonzero/timeout with no contract line ⇒ the generic
+                // `doctor_check <name> failed` row (§5.3), naming the plugin.
+                let name = row.plugin_name.as_deref().unwrap_or("project");
+                Check::new(
+                    id,
+                    CheckStatus::Fail,
+                    format!("{who} — doctor_check {name} failed"),
+                )
+                .with_help(
+                    "the plugin's doctor_check hook exited nonzero or timed out without \
+                     printing a result line — check the plugin, or `rackabel plugin \
+                     disable` it",
+                )
+            }
+        };
+        diag.push(check);
+    }
 }
 
 /// The no-Live headline failure (the §6.2 transcript wording).
