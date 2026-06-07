@@ -23,8 +23,10 @@
 //!     install as evidence the host supports that known apiVersion and otherwise
 //!     skip-with-note. (DEVIATIONS D-11.)
 //!   - **Stable-identifier drift** cannot diff command ids that never appear on disk.
-//!     We implement what is checkable and record the command-id drift as deferred.
-//!     (DEVIATIONS D-12.)
+//!     What the manifest DOES carry is the extension `name` (the identifier Live keys
+//!     saved state on), so the finalized 0.5 rule diffs the current manifest `name`
+//!     against the last-packed snapshot in `.rackabel/state.toml` and warns on a
+//!     rename; the command-id surface stays deferred. (DEVIATIONS D-12/D-102.)
 
 use std::path::Path;
 
@@ -80,7 +82,6 @@ impl Check {
             message: message.into(),
         }
     }
-    #[allow(dead_code)] // Reserved for warning-tier rules (e.g. command-id drift, 0.3+).
     fn warn(id: &'static str, message: impl Into<String>) -> Self {
         Self {
             id,
@@ -372,21 +373,49 @@ fn find_dot_node(dir: &Path) -> bool {
     false
 }
 
-/// Rule 6: stable-identifier drift.
+/// Rule 6: stable-identifier drift (DESIGN §2 finalized in 0.5).
 ///
-/// DESIGN §2 treats a removed/renamed command id as a compatibility break. But
-/// commands are registered in *code* at runtime and never appear in the manifest
-/// (SPEC A §2), so there is no on-disk command list to diff, and the last packed
-/// manifest is not retained on disk in 0.2 (only the version is in `state.toml`).
-/// We therefore surface this honestly as a skip rather than a false pass. Full
-/// command-id drift is deferred (DEVIATIONS D-12); the rule is warning-tier and only
-/// fatal under `--strict` once it has something to compare.
-fn check_identifier_drift(_project: &Project, _ext: &ResolvedExtension) -> Check {
-    Check::skip(
-        "identifier-drift",
-        "stable-identifier drift — not checkable yet (command ids are registered in code, \
-         not the manifest; see `rackabel explain RK4005`)",
-    )
+/// DESIGN §2 treats a removed/renamed *command id* as a compatibility break ("existing
+/// setups may break — keep the old id or provide a migration"). But commands are
+/// registered in *code* at runtime and never appear in the SDK manifest (SPEC A §2),
+/// so there is no on-disk command-id list to diff (the command-id surface stays
+/// deferred — DEVIATIONS D-12). What the manifest DOES carry is the extension `name`,
+/// which is the identifier Live keys an extension's saved state on — so a `name` change
+/// between the last shipped pack and now is the on-disk stable-identifier drift this
+/// rule warns about (DEVIATIONS D-102).
+///
+/// We compare the CURRENTLY resolved manifest `name` (what the next build/pack would
+/// write) against `state.last_packed_manifest` (the snapshot `pack` persisted). With no
+/// prior pack there is nothing to diff (skip-with-note). A changed `name` is a
+/// **warning** (the §2 example shape) — non-fatal unless `--strict`.
+fn check_identifier_drift(project: &Project, ext: &ResolvedExtension) -> Check {
+    let state = manifest::state::load(&project.root).unwrap_or_default();
+    let Some(snapshot) = state.last_packed_manifest else {
+        return Check::skip(
+            "identifier-drift",
+            "stable-identifier drift — skipped (no previous pack recorded to compare against)",
+        );
+    };
+    if snapshot.name == ext.name {
+        Check::pass(
+            "identifier-drift",
+            format!(
+                "stable identifier `{}` unchanged since the last pack",
+                ext.name
+            ),
+        )
+    } else {
+        // The §2 warning shape, adapted to the on-disk identifier (the extension name):
+        // `name `Old` was renamed to `New` (present in 1.1.0) — existing setups may break`.
+        Check::warn(
+            "identifier-drift",
+            format!(
+                "name `{}` was renamed to `{}` (present in {}) — existing setups may break; \
+                 keep the old name or provide a migration",
+                snapshot.name, ext.name, snapshot.version
+            ),
+        )
+    }
 }
 
 // --- reporting --------------------------------------------------------------
@@ -457,7 +486,10 @@ fn report_json(checks: &[Check], strict: bool) -> CmdResult<()> {
     println!("{}", serde_json::to_string_pretty(&out).expect("json"));
 
     if effective_failed > 0 {
-        Err(validation_error(checks, failed, warnings, strict))
+        // The checklist object above is the authoritative `--json` output (its `ok:false`
+        // + per-check failures carry everything a consumer needs). Mark the error
+        // `json_handled` so `main` does not print a second JSON error object on stdout.
+        Err(validation_error(checks, failed, warnings, strict).json_handled())
     } else {
         Ok(())
     }
@@ -736,6 +768,87 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("x.node"), b"\0").unwrap();
         assert!(!find_dot_node(tmp.path()));
+    }
+
+    // --- stable-identifier drift ----------------------------------------
+
+    fn snapshot(name: &str, version: &str) -> manifest::state::PackedManifestSnapshot {
+        manifest::state::PackedManifestSnapshot {
+            name: name.into(),
+            author: "Jane".into(),
+            entry: "dist/extension.js".into(),
+            version: version.into(),
+            minimum_api_version: "1.0.0".into(),
+        }
+    }
+
+    #[test]
+    fn drift_skips_with_no_prior_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = project_at(tmp.path());
+        let mut e = ext((1, 1, 0), (1, 0, 0), vec![]);
+        e.name = "Clip Renamer".into();
+        let c = check_identifier_drift(&p, &e);
+        assert_eq!(c.status, Status::Skip);
+    }
+
+    #[test]
+    fn drift_passes_when_name_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        manifest::state::save(
+            tmp.path(),
+            &manifest::state::State {
+                last_packed_manifest: Some(snapshot("Clip Renamer", "1.0.0")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let p = project_at(tmp.path());
+        let mut e = ext((1, 1, 0), (1, 0, 0), vec![]);
+        e.name = "Clip Renamer".into();
+        let c = check_identifier_drift(&p, &e);
+        assert_eq!(c.status, Status::Pass);
+    }
+
+    #[test]
+    fn drift_warns_when_name_changed_with_section2_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        manifest::state::save(
+            tmp.path(),
+            &manifest::state::State {
+                last_packed_manifest: Some(snapshot("Clip Renamer", "1.1.0")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let p = project_at(tmp.path());
+        let mut e = ext((1, 2, 0), (1, 0, 0), vec![]);
+        e.name = "Clip Tool".into();
+        let c = check_identifier_drift(&p, &e);
+        assert_eq!(c.status, Status::Warn);
+        // The §2 warning shape: names the old + new identifier and the version it
+        // shipped in, and ends with the "existing setups may break" clause.
+        assert!(c.message.contains("`Clip Renamer`"));
+        assert!(c.message.contains("`Clip Tool`"));
+        assert!(c.message.contains("present in 1.1.0"));
+        assert!(c.message.contains("existing setups may break"));
+    }
+
+    /// A rename warning is non-fatal by default (exit 0) but `--strict` promotes it to a
+    /// validation failure (exit 4) — the §2 "keep the old id or migrate" gate for CI.
+    #[test]
+    fn drift_warning_is_strict_fatal_only() {
+        let checks = vec![
+            Check::pass("manifest-complete", "ok"),
+            Check::warn("identifier-drift", "name `A` was renamed to `B`"),
+        ];
+        // Non-strict: a warning is not a failure.
+        let failed = checks.iter().filter(|c| c.status == Status::Fail).count();
+        assert_eq!(failed, 0);
+        // Strict: the warning is promoted, and the chosen code is IdentifierDrift.
+        let e = validation_error(&checks, 0, 1, true);
+        assert_eq!(e.code, ErrorCode::IdentifierDrift);
+        assert_eq!(e.class, ExitClass::Validation);
     }
 
     // --- summary line ----------------------------------------------------

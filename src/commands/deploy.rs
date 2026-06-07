@@ -59,16 +59,20 @@ fn deploy_extension(project: &Project, args: &DeployArgs, ctx: &Ctx) -> CmdResul
     let ext = project.resolved_extension(ctx)?;
     let slug = project.slug();
 
-    // --release: run validate first; any validation error fails the deploy (exit 4)
-    // before we build or touch the User Library (DESIGN §2 deploy).
+    // §7 exit-code precedence: environment(3) short-circuits before validation(4).
+    // Resolve the deploy target FIRST so a User-Library-not-found / ambiguous env error
+    // (exit 3) wins over a `--release` validation failure (exit 4) when both hold — a CI
+    // run on an unprepared machine must read "this machine isn't set up" (3), not "my
+    // manifest is wrong" (4). It also stops us before any build/copy and lets --dry-run
+    // report the resolved target. (See DEVIATIONS D-103.)
+    let ul = user_library::resolve(Some(project), ctx)?;
+    let dest = user_library::extension_install_dir(&ul, &slug);
+
+    // --release: validate after the environment gate; any validation error fails the
+    // deploy (exit 4) before we build or copy (DESIGN §2 deploy).
     if args.release {
         crate::commands::validate::run(&crate::cli::ValidateArgs { strict: false }, ctx)?;
     }
-
-    // Resolve the deploy target up front so --dry-run can report it and a
-    // User-Library-not-found error stops us before any build/copy.
-    let ul = user_library::resolve(Some(project), ctx)?;
-    let dest = user_library::extension_install_dir(&ul, &slug);
 
     // The copy set: manifest.json + dist/extension.js + extra dist files (under dist/).
     let manifest_src = project.root.join("manifest.json");

@@ -17,8 +17,10 @@ pub fn run(args: &PluginNameArgs, ctx: &Ctx) -> CmdResult<()> {
     if ctx.json {
         print_json(name, &r);
         // A shadowed/not-found state still exits with the relevant code even under
-        // --json, so a script can branch on the exit code as well as the JSON.
-        return classify_exit(name, &r);
+        // --json, so a script can branch on the exit code as well as the JSON. The
+        // resolution object above is the authoritative machine output, so mark the
+        // error `json_handled` to suppress a second JSON error object in `main`.
+        return classify_exit(name, &r).map_err(RkError::json_handled);
     }
 
     match &r {

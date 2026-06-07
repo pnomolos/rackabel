@@ -349,6 +349,16 @@ pub struct RkError {
     pub help: String,
     /// The raw internal chain; never primary output.
     pub raw: Option<anyhow::Error>,
+    /// Set by a command that ALREADY printed a complete `--json` envelope on its
+    /// failure path (validate's checklist object, `dev test`'s targets envelope,
+    /// `dev reload`'s result object, …). When `true`, `main` must NOT print a second
+    /// JSON error object under `--json` — that command's domain envelope is the single
+    /// authoritative machine output on stdout, and only the human frame (stderr) is
+    /// suppressed. When `false` (the default — a setup/environment failure that printed
+    /// nothing to stdout yet), `main` emits the JSON error envelope so a `--json`
+    /// consumer always gets a parseable object instead of an empty stdout + a human
+    /// frame on stderr (DESIGN §7). (See DEVIATIONS D-102.)
+    pub json_emitted: bool,
 }
 
 impl RkError {
@@ -368,6 +378,7 @@ impl RkError {
             location: None,
             help: help.into(),
             raw: None,
+            json_emitted: false,
         }
     }
 
@@ -387,6 +398,15 @@ impl RkError {
     #[must_use]
     pub fn raw(mut self, e: anyhow::Error) -> Self {
         self.raw = Some(e);
+        self
+    }
+
+    /// Builder: mark that the command already printed its own complete `--json`
+    /// envelope on this failure path, so `main` must not print a second JSON error
+    /// object under `--json` (see [`RkError::json_emitted`]). A no-op for human output.
+    #[must_use]
+    pub fn json_handled(mut self) -> Self {
+        self.json_emitted = true;
         self
     }
 }

@@ -69,7 +69,19 @@ fn main() -> ExitCode {
     match dispatch(cli.command, &ctx) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            ui::print_error(&err, &ctx);
+            // Under `--json`, a failure must be a single machine-readable object on
+            // stdout — never a human frame on stderr with an empty stdout (DESIGN §7).
+            // A command that already printed its own complete JSON envelope on this
+            // failure path (validate/dev test/dev reload/…) marks the error
+            // `json_handled()`, so we suppress the second object and only set the exit
+            // code. Human mode always prints the three-part frame.
+            if ctx.json {
+                if !err.json_emitted {
+                    ui::frame::print_error_json(&err, &ctx);
+                }
+            } else {
+                ui::print_error(&err, &ctx);
+            }
             ExitCode::from(err.class as u8)
         }
     }

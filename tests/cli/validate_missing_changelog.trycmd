@@ -9,7 +9,7 @@ $ ABLETON_APP=/nonexistent-ableton-live.app RACKABEL_HOME=rk-home rackabel valid
 [!] version 1.2.0 — skipped (no previous pack recorded; this is the first release)
 [✗] CHANGELOG.md not found — add one with an entry for 1.2.0 (e.g. `## 1.2.0`)
 [!] native dependencies — none declared
-[!] stable-identifier drift — not checkable yet (command ids are registered in code, not the manifest; see `rackabel explain RK4005`)
+[!] stable-identifier drift — skipped (no previous pack recorded to compare against)
 1 failure
 error: validation failed — 1 failure [RK4001]
   help: fix the rule(s) marked ✗ above, then rerun `rackabel validate`

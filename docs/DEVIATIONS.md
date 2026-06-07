@@ -1340,3 +1340,59 @@ engine-level failure (a command path that does not exist) is a framed `RkError`,
 an in-contract `HookOutcome` (informational-skip / veto / doctor-row / template-choice). The
 BODY is a stub returning `RK1309` until the 0.5 feature agent lands the subprocess/timeout
 machinery; the signature is frozen now so callers compile against it.
+
+### D-102. Stable-identifier drift diffs the manifest `name`, not command ids; the error envelope is a new `--json` failure shape (DESIGN §2/§7, milestone 0.5 SHIP-QUALITY)
+
+DESIGN §2's stable-identifier-drift example diffs a *command id* (`command id `rename` was
+removed (present in 1.1.0)`). But the SDK `manifest.json` carries only five fields
+(name/author/entry/version/minimumApiVersion); commands and context-menu actions are
+registered in *code* at runtime and never appear on disk (SPEC A §2, see also D-12). So
+there is no on-disk command-id list to diff, and faking one would be a false signal. What
+the manifest DOES carry — and what Live keys an extension's saved state on — is the
+extension `name`. The finalized 0.5 rule therefore diffs the **`name`** of the currently
+resolved manifest against `state.last_packed_manifest` (a new snapshot `pack` persists),
+emitting the §2 warning *shape* adapted to that identifier:
+`name `Old` was renamed to `New` (present in 1.1.0) — existing setups may break; keep the
+old name or provide a migration`. It is warning-tier (exit 0) and `--strict`-fatal (exit 4,
+`RK4005`), exactly as §2 specifies. Command-id drift stays deferred (D-12) until ids become
+diffable on disk. The snapshot is a new optional `[last_packed_manifest]` table in
+`.rackabel/state.toml` (`PackedManifestSnapshot`), additive and backward-compatible (a
+legacy state file with no snapshot loads as `None` ⇒ skip-with-note).
+
+ALSO under D-102: the `--json` **error envelope**. Section 7 requires that under `--json` a
+failure is "errors as a JSON object with code/problem/help … not a human frame on stderr
+mixed with JSON on stdout". Pre-0.5, `main` always printed the human three-part frame to
+stderr — so a `--json` consumer of a *setup/environment* failure (no manifest, bad TOML, no
+User Library) got an EMPTY stdout. The fix: `main` now renders a uniform JSON error envelope
+on stdout under `--json` —
+`{ ok:false, code, exit, problem, location, help[, raw] }` (`location` is `null` when
+absent; `raw` only under `--raw`/`--verbose`). Commands that already print a complete domain
+envelope on their failure path (`validate`'s checklist, `dev test`'s targets, `dev reload`'s
+result) mark the error `RkError::json_handled()` (a new `json_emitted: bool` field +
+builder), so `main` suppresses the second object and stdout stays exactly one JSON value.
+`doctor` is unchanged (it already renders JSON then exits directly). The new `json_emitted`
+field defaults `false` and is the only addition to the shared `RkError` type — additive and
+behavior-preserving for human mode.
+
+### D-103. `deploy --release` resolves the User Library (environment) BEFORE running validate (DESIGN §7 precedence, milestone 0.5 SHIP-QUALITY)
+
+The exit-code precedence audit found a divergence in `deploy --release`: it ran `validate`
+(exit 4) *before* `user_library::resolve` (exit 3). On an unprepared machine with BOTH a
+validation failure AND no resolvable User Library, the user got exit `4`, but §7 requires the
+environment check to short-circuit first so `3` is returned before `4` is ever reached
+("this machine isn't set up" must not be masked by "my manifest is wrong"). Fixed by
+resolving the User Library FIRST, then running the `--release` validate. Behavior is
+otherwise identical (the `--dry-run` early-return still happens after both, as before; a
+ready-environment validation failure still returns `4`). Covered by the exit-code matrix
+(`deploy_release_environment_short_circuits_validation` /
+`deploy_release_validation_only_is_exit_4`).
+
+NOTE on `pack` (recorded, NOT changed): `pack` runs the production build (exit 1, whose env
+subset — node resolution, `RK0305` — is itself environment-first) and THEN `validate` (exit
+4). This is build-before-validate, which inverts the 4>1 *cause-attribution* order, but it is
+structurally required: validate's native-`.node` and manifest checks read artifacts the build
+produces, so validate cannot run first. The environment subset (node) still runs first via
+the build, satisfying the §7 environment-short-circuit guarantee; only the build/validate
+ordering is reversed, and a build failure there is the genuine first cause. We keep the
+documented "production build → validate" pack flow and record the boundary here rather than
+reorder into a broken state.

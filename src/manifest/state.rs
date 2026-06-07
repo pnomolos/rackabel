@@ -28,6 +28,35 @@ pub struct State {
     /// multi-Live choice). Recorded so `rackabel dev` recalls the choice instead of
     /// re-prompting; the per-Live daemon socket/pidfile is keyed off this path's hash.
     pub dev_live: Option<String>,
+    /// A snapshot of the SDK `manifest.json` as it was at the last `pack` (DESIGN §2
+    /// stable-identifier drift). Persisted so `validate` can diff the CURRENTLY
+    /// generated manifest's stable identifiers against the last shipped ones and warn
+    /// when one disappeared/changed — "this breaks existing users' saved state". The
+    /// SDK manifest carries only the five fields it reads (commands are registered in
+    /// *code*, never on disk — DEVIATIONS D-12/D-102), so the checkable on-disk
+    /// identifier is the extension `name` (the key Live uses for an extension's saved
+    /// state); `entry` is recorded too for completeness. A missing snapshot means "no
+    /// prior pack to diff against".
+    pub last_packed_manifest: Option<PackedManifestSnapshot>,
+}
+
+/// The subset of the SDK `manifest.json` that `pack` snapshots for drift detection
+/// (DESIGN §2). Mirrors the five fields the toolchain reads (SPEC A §2). Stored under
+/// `[last_packed_manifest]` in `.rackabel/state.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackedManifestSnapshot {
+    /// The extension `name` — the stable identifier Live keys saved state on. A change
+    /// here is the on-disk "stable-identifier drift" the validate rule warns about.
+    pub name: String,
+    /// The manifest `author` (recorded for completeness; not drift-checked).
+    pub author: String,
+    /// The built `entry` bundle path (recorded for completeness).
+    pub entry: String,
+    /// The version this manifest shipped at — used in the §2 warning text
+    /// ("present in 1.1.0").
+    pub version: String,
+    /// The `minimumApiVersion` this manifest declared (recorded for completeness).
+    pub minimum_api_version: String,
 }
 
 /// Load the state for a project root. A missing file yields `State::default()`.
@@ -100,10 +129,34 @@ mod tests {
             build_hash: Some("deadbeef".into()),
             deployed_at: Some("2026-06-06T00:00:00Z".into()),
             dev_live: None,
+            last_packed_manifest: Some(PackedManifestSnapshot {
+                name: "Clip Renamer".into(),
+                author: "Jane".into(),
+                entry: "dist/extension.js".into(),
+                version: "1.2.3".into(),
+                minimum_api_version: "1.0.0".into(),
+            }),
         };
         save(tmp.path(), &s).unwrap();
         let back = load(tmp.path()).unwrap();
         assert_eq!(back.last_packed_version.as_deref(), Some("1.2.3"));
         assert_eq!(back.build_hash.as_deref(), Some("deadbeef"));
+        let snap = back.last_packed_manifest.expect("snapshot persisted");
+        assert_eq!(snap.name, "Clip Renamer");
+        assert_eq!(snap.entry, "dist/extension.js");
+        assert_eq!(snap.version, "1.2.3");
+    }
+
+    /// A state.toml written by an older rackabel (no `[last_packed_manifest]`) still
+    /// loads — the field defaults to `None` (additive, backward-compatible).
+    #[test]
+    fn legacy_state_without_snapshot_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(STATE_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(STATE_FILE), "last_packed_version = \"1.0.0\"\n").unwrap();
+        let s = load(tmp.path()).unwrap();
+        assert_eq!(s.last_packed_version.as_deref(), Some("1.0.0"));
+        assert!(s.last_packed_manifest.is_none());
     }
 }
