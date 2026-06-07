@@ -1218,3 +1218,64 @@ clear `RK0401` frame (naming the cloned commit) pointing the user at publishing 
 asset or sideloading a locally-built executable — never a silent "installed nothing". The
 asset path is the intended production route; the full auto-build of an arbitrary repo is left
 for a later milestone.
+
+## 0.4 templates (`new --template` render + `new --update` 3-way merge)
+
+### D-95. Tier-1 templates land (`new --template` render + `new --update` 3-way merge) — supersedes D-86's boundary (DESIGN §5.5/§5.7)
+
+The TEMPLATES tier-1 surface is now implemented (`src/templates/`: `render`, `update`,
+`placeholder`, `exclude`), replacing the foundation's "not implemented yet" boundary
+(D-86): `new --template gh:owner/repo[@ref]` and `new --template <local-path>` resolve a
+`rackabel-template.toml`, run its `[prompts]` as the wizard, copy the tree with `{{ key }}`
+substitution, and persist `.rackabel-template` (repo + ref + commit + answers). `new
+--update` re-renders old@oldcommit + new@newcommit and 3-way-merges against the user tree.
+D-86's invariants survive verbatim: a malformed ref is `RK0101`; a remote ref under
+`--no-input` without `--yes` REFUSES (`RK0403`) — never a silent default. The frozen
+classification (`TemplateSource`), the lockfile models (`plugin::template`), and the network
+seams (`RACKABEL_TEMPLATE_GIT_BASE`) the foundation froze are reused unchanged.
+
+### D-96. The placeholder syntax is a deliberately minimal `{{ key }}` (DESIGN §5.5 "declarative data, never dependent on rackabel internals")
+
+The substitution language is ONE construct — `{{ key }}`, with optional inner ASCII
+whitespace — and nothing else: no conditionals, loops, partials, or filters. Rationale: §5.5
+demands templates be "declarative data" that "don't bit-rot when rackabel changes" (the
+Yeoman-decline lesson), so the syntax is intentionally too small to depend on internals. An
+UNKNOWN key is left VERBATIM (not substituted-to-empty) so a typo is visible in the output;
+substitution is a single left-to-right pass (a replacement value is never re-scanned, so an
+answer that contains `{{…}}` can't trigger a second substitution — no answer-driven
+injection). The syntax is documented in `docs/TEMPLATES.md` (the template-author reference)
+and in the `placeholder` module docs.
+
+### D-97. `@scope/name` templates are accepted + classified but not resolved in 0.4 (out of scope, not half-done) (DESIGN §5.5)
+
+`TemplateSource` parses `@scope/name`, but npm-registry resolution is OUT OF SCOPE for 0.4.
+Rather than half-implement it, `new --template @scope/name` emits a clear not-yet-supported
+frame (`RK0402`) pointing the user at `gh:owner/repo` or a local checkout. gh: and local
+paths are the two fully-supported resolution kinds this milestone.
+
+### D-98. `[merge].exclude` is UNIONED with an always-excluded binary/tarball set (DESIGN §5.5)
+
+§5.5 says vendored SDK/CLI tarballs and other binary/generated files are excluded from the
+3-way text merge "per a declared `[merge].exclude` glob". To be safe-by-default, the
+author's declared globs are UNIONED with a built-in `ALWAYS_EXCLUDED` set (`**/*.tgz`,
+`**/*.tar.gz`, `**/*.zip`, `**/*.node`, `**/*.wasm`, common images, `**/vendor/**`,
+`**/node_modules/**`, and the npm/pnpm/yarn lockfiles), so a template that forgets to list
+its vendored toolkit still never gets its tarballs mangled or marker-corrupted. Excluded
+files are copied VERBATIM on the initial render (no substitution) and, on update, are
+OVERWRITTEN from the new render when changed (never text-merged). A no-slash declared
+pattern (e.g. `*.tgz`) is matched at any depth, matching author intuition. Additionally, a
+non-UTF-8 file the author did NOT list is copied verbatim rather than corrupted.
+
+### D-99. `new --dry-run` (with `--update`) + `tempfile` promoted to a normal dependency; `merge_file`/`clone_full`/`checkout` added to the git wrapper (DESIGN §5.5)
+
+Three shared-surface additions the tier-1 work required (flagged for the integrator):
+(1) `NewArgs` gains `--dry-run` (only meaningful with `--update`: prints the merge plan —
+which files apply/conflict/overwrite/skip — and mutates nothing). (2) `tempfile` moves from
+a dev-dependency to a normal dependency, because the remote-clone holder and the old/new
+render scratch trees `--update` merges are runtime temp dirs, not test-only. (3) The
+FOUNDATION git wrapper (`plugin::git`) gains `clone_full` (full history, so two commits can
+be checked out from one clone), `checkout`, and `merge_file` (an arg-array-safe wrapper over
+`git merge-file` that maps the conflict exit to `false`, not an error). The 3-way merge uses
+`git merge-file` per text file (per the task's "git merge-file per text file is fine");
+`--update` clones a LOCAL template repo into a tempdir rather than checking out commits in
+the user's own template work tree, so the source repo's HEAD is never mutated.

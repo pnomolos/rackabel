@@ -38,6 +38,86 @@ pub fn clone_shallow(
     Ok(())
 }
 
+/// Clone `url` into `dest` with FULL history (no `--depth`), optionally at `git_ref`.
+/// Unlike [`clone_shallow`], the resulting work tree can be `git checkout`'d to an
+/// arbitrary historical commit — which `new --update` needs to re-render the OLD baseline
+/// (template@oldcommit) and the NEW render (template@newcommit) from one clone. The args
+/// are a fixed array; `url`/`git_ref` are never shell-interpolated.
+pub fn clone_full(url: &str, git_ref: Option<&str>, dest: &Path, code: ErrorCode) -> CmdResult<()> {
+    let dest_str = dest.to_string_lossy();
+    let mut args: Vec<&str> = vec!["clone", "--quiet"];
+    if let Some(r) = git_ref {
+        args.push("--branch");
+        args.push(r);
+    }
+    args.push(url);
+    args.push(&dest_str);
+    run(&args, None, code, "could not clone the repository")?;
+    Ok(())
+}
+
+/// Check out `commit` (a sha/ref) in the work tree at `repo` (detached). Used by
+/// `new --update` to materialize a template at a specific historical commit.
+pub fn checkout(repo: &Path, commit: &str, code: ErrorCode) -> CmdResult<()> {
+    run(
+        &["checkout", "--quiet", commit],
+        Some(repo),
+        code,
+        "could not check out that commit",
+    )?;
+    Ok(())
+}
+
+/// 3-way merge `current` (ours) against `base` and `other` (theirs) IN PLACE, writing
+/// conflict markers into `current` on a conflict (the `git merge-file` contract). Returns
+/// `true` on a clean merge, `false` when conflict markers were written. A genuine error
+/// (a missing file, git not runnable) is framed; the merge "conflict" exit (>0 but not an
+/// error) is mapped to `false`, not an error.
+pub fn merge_file(current: &Path, base: &Path, other: &Path, code: ErrorCode) -> CmdResult<bool> {
+    let cur = current.to_string_lossy();
+    let bas = base.to_string_lossy();
+    let oth = other.to_string_lossy();
+    // -p would write to stdout; we want the in-place 3-way merge of `current`.
+    // Labels make the conflict markers self-explaining in the user's file.
+    let args = vec![
+        "merge-file",
+        "-L",
+        "your version",
+        "-L",
+        "template (old)",
+        "-L",
+        "template (new)",
+        cur.as_ref(),
+        bas.as_ref(),
+        oth.as_ref(),
+    ];
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(&args);
+    let output = cmd.output().map_err(|e| {
+        RkError::of(
+            code,
+            "could not run `git merge-file`",
+            "install git (it ships with the Xcode command-line tools on macOS), then retry",
+        )
+        .raw(e.into())
+    })?;
+    // git merge-file: exit 0 = clean, exit N>0 (number of conflicts) = conflicts written,
+    // exit <0 / 255 = real error.
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(n) if n > 0 && n < 128 => Ok(false),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            Err(RkError::of(
+                code,
+                "git merge-file failed",
+                "run with --raw for git's output",
+            )
+            .raw(anyhow::anyhow!(stderr)))
+        }
+    }
+}
+
 /// The resolved commit of the work tree at `repo` (`git rev-parse HEAD`). This is the
 /// value pinned in `plugins.lock` / `.rackabel-template` — a 40-hex sha.
 pub fn rev_parse_head(repo: &Path, code: ErrorCode) -> CmdResult<String> {
