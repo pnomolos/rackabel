@@ -41,13 +41,6 @@ fn read_daemon_pid(home: &Path) -> Option<i32> {
     None
 }
 
-fn force_stop(home: &Path, cwd: &Path, live: &Path) {
-    let _ = dev_cmd(home, cwd, live).args(["dev", "stop"]).output();
-    if let Some(pid) = read_daemon_pid(home) {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-    }
-}
-
 /// Seed registry.toml with N enabled extensions whose project roots exist (so the
 /// working-set resolution + plan derivation succeed). The FakeHost advertises the same
 /// names so `dev status` reports them Loaded.
@@ -134,6 +127,7 @@ fn dev_watch_without_daemon_is_no_daemon() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
     seed_registry(home.path(), work.path(), &["a"]);
 
@@ -153,6 +147,7 @@ fn watch_non_tty_prints_liveness_and_no_hotkeys() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
     seed_registry(home.path(), work.path(), &["clip-renamer"]);
 
@@ -180,8 +175,6 @@ fn watch_non_tty_prints_liveness_and_no_hotkeys() {
         !joined.contains("[q] quit"),
         "non-TTY must NOT print the hotkey legend, got:\n{joined}"
     );
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 /// With more than 4 enabled extensions, bare `dev` prints the one-time scope hint (§3.3).
@@ -191,6 +184,7 @@ fn scope_hint_fires_above_four_enabled() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
     let names = ["a", "b", "c", "d", "e"];
     seed_registry(home.path(), work.path(), &names);
@@ -208,8 +202,6 @@ fn scope_hint_fires_above_four_enabled() {
         joined.contains("extensions loaded — reloads re-run all of them"),
         "expected the >4 scope hint, got:\n{joined}"
     );
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 /// `--only <glob>` scopes the working set to matching names: the loop loads just those,
@@ -219,6 +211,7 @@ fn only_glob_scopes_and_suppresses_hint() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
     let names = ["harmonic-lens", "harmonic-x", "groove", "petri", "lidal"];
     seed_registry(home.path(), work.path(), &names);
@@ -246,6 +239,4 @@ fn only_glob_scopes_and_suppresses_hint() {
         joined.contains("watching for changes"),
         "still expected the legend, got:\n{joined}"
     );
-
-    force_stop(home.path(), work.path(), live.app_path());
 }

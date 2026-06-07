@@ -1245,6 +1245,7 @@ fn quiet_ctx(ctx: &Ctx) -> Ctx {
     Ctx {
         no_input: ctx.no_input,
         json: true,
+        quiet: false,
         verbose: ctx.verbose,
         raw: ctx.raw,
         color: ctx.color,

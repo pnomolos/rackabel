@@ -13,6 +13,15 @@ $ RACKABEL_HOME=rk-home-reg rackabel dev register my-ext
 
 ```
 
+Registering the SAME path again is idempotent — it reports the existing entry and does
+NOT create a second one (finding #6):
+
+```
+$ RACKABEL_HOME=rk-home-reg rackabel dev register my-ext
+[✓] my-ext is already registered
+
+```
+
 List shows one enabled row (STATUS / NAME / PATH):
 
 ```
@@ -76,14 +85,15 @@ $ RACKABEL_HOME=rk-home-reg rackabel dev list
 
 ```
 
-Unregistering something that was never there names the bad target (exit 3, RK0309):
+Unregistering something that was never there names the bad target (a usage mistake,
+exit 2, RK0102 — these verbs work without a daemon, so it is NOT the daemon code):
 
 ```
 $ RACKABEL_HOME=rk-home-reg rackabel dev unregister nope
-? 3
-error: no registry entry named or at `nope` [RK0309]
+? 2
+error: no registry entry named or at `nope` [RK0102]
   --> nope
-  help: run `rackabel dev list` to see registered extensions
-(run `rackabel explain RK0309` for details)
+  help: run `rackabel dev list` to see registered extensions, or `rackabel dev register <path>` to add one
+(run `rackabel explain RK0102` for details)
 
 ```

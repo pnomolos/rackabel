@@ -12,7 +12,7 @@
 use std::io::Write;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,7 +29,10 @@ use super::ipc::{self, InspectorState, Request, Response, ResponseSink};
 use super::logs::LogSink;
 use super::registry::Registry;
 use super::resolve::{self, DevTarget};
-use super::{DEV_PROTOCOL_VERSION, Inspect, RegistryEntry, host_out_path, pid_path, sock_path};
+use super::{
+    DEV_PROTOCOL_VERSION, Inspect, RegistryEntry, host_out_path, pid_path, sock_path,
+    start_lock_path,
+};
 
 /// The atomically-written pidfile contents (SPEC D §1). TOML at
 /// `~/.rackabel/daemon/<hash>.pid`.
@@ -45,6 +48,12 @@ pub struct PidFile {
     pub host_module: PathBuf,
     pub eh_node: PathBuf,
     pub started_at: u64,
+    /// The current Extension Host child's process-group id, recorded so a `dev start`
+    /// after a `-9`'d daemon can killpg the orphaned host (finding #9/#11). The host is
+    /// its own group leader (`pgid == host_pid`); `None`/`0` = no host recorded yet.
+    /// Defaults for backward-compat with a pidfile written by an older daemon.
+    #[serde(default)]
+    pub host_pgid: Option<i32>,
 }
 
 /// The arguments the hidden `__daemon` re-exec carries (SPEC D §1).
@@ -62,11 +71,19 @@ pub fn start(ctx: &Ctx) -> CmdResult<DevTarget> {
     let target = resolve::resolve(ctx)?;
     let sock = sock_path(ctx, target.app());
 
-    // Already up? Reuse it (idempotent double-start).
+    // Serialize concurrent starts for THIS Live (finding #11): hold an exclusive
+    // lockfile across the is-running check + re-exec + wait-until-up, so a second
+    // concurrent `dev start` observes the first daemon and reuses it instead of racing
+    // to spawn its own daemon+host (leaking an unreachable orphan host). The guard is a
+    // best-effort advisory `O_CREAT|O_EXCL` lock; if it can't be taken in time we still
+    // proceed (degrading to the old behavior) rather than failing a legitimate start.
+    let _start_guard = StartLock::acquire(&start_lock_path(ctx, target.app()));
+
+    // Already up (identity-verified)? Reuse it (idempotent double-start).
     if is_running(ctx, target.app()) {
         return Ok(target);
     }
-    // Reclaim a stale pidfile/socket from a previous run.
+    // Reclaim a stale pidfile/socket (and any orphaned host) from a previous run.
     reclaim_stale(ctx, target.app());
 
     re_exec_daemon(ctx, &target)?;
@@ -134,24 +151,66 @@ fn wait_until_up(sock: &Path) -> CmdResult<()> {
     }
 }
 
-/// Whether a live daemon for `live_app` is up: a parseable pidfile + `kill(pid, None)`
-/// alive + an understood `version` (SPEC D §1).
+/// Whether a live daemon for `live_app` is up — IDENTITY-bound, not just pid-alive
+/// (finding #10). A bare `kill(pid, 0)` can be fooled by PID reuse (a `-9`'d daemon
+/// orphans its pidfile; the OS recycles that pid for an unrelated process). So we
+/// require a successful control-socket `Ping` whose `Pong.pid` matches the pidfile's
+/// pid: that proves the live process is actually OUR daemon, not a recycled stranger.
+/// A pidfile whose pid is dead, whose version is unknown, or whose socket won't answer
+/// a matching Pong is treated as NOT running (and reclaimed by the caller).
 pub fn is_running(ctx: &Ctx, live_app: &Path) -> bool {
     match read_pidfile(ctx, live_app) {
-        Some(pf) => pf.version == DEV_PROTOCOL_VERSION && pid_alive(pf.pid),
+        Some(pf) => {
+            pf.version == DEV_PROTOCOL_VERSION && pid_alive(pf.pid) && ping_identity_ok(&pf)
+        }
         None => false,
     }
 }
 
-/// Reclaim a stale pidfile + socket (process gone, or socket without a live pid).
+/// Probe the daemon's socket with a `Ping` and confirm the `Pong` carries the pidfile's
+/// own pid + a matching protocol version — the identity handshake that defeats PID reuse
+/// (finding #10). Any connect/parse/mismatch failure ⇒ not our daemon.
+fn ping_identity_ok(pf: &PidFile) -> bool {
+    let Ok(mut client) = ipc::Client::connect(&pf.sock) else {
+        return false;
+    };
+    matches!(
+        client.call(Request::Ping),
+        Ok(Response::Pong { pid, protocol_v, .. })
+            if pid == pf.pid && protocol_v == DEV_PROTOCOL_VERSION
+    )
+}
+
+/// Reclaim a stale pidfile + socket (process gone, identity mismatch, or a socket
+/// without a verifiable daemon). When the recorded process is NOT our live daemon but a
+/// leftover host process group may still be alive (a `-9`'d daemon's orphan, finding
+/// #9), killpg the recorded pgid first so the next start doesn't leak it.
 fn reclaim_stale(ctx: &Ctx, live_app: &Path) {
     let pidf = pid_path(ctx, live_app);
     let sockf = sock_path(ctx, live_app);
-    let alive = read_pidfile(ctx, live_app).is_some_and(|pf| pid_alive(pf.pid));
-    if !alive {
-        let _ = std::fs::remove_file(&pidf);
+    let Some(pf) = read_pidfile(ctx, live_app) else {
+        // No pidfile — just clear any stray socket.
         let _ = std::fs::remove_file(&sockf);
+        return;
+    };
+    // Our live daemon? Leave it entirely alone.
+    if pf.version == DEV_PROTOCOL_VERSION && pid_alive(pf.pid) && ping_identity_ok(&pf) {
+        return;
     }
+    // Not our daemon: reap the orphaned Extension Host process group recorded in the
+    // pidfile (best-effort) so a `-9`'d-daemon's host doesn't survive across start
+    // cycles. The host is its OWN group leader (its pgid != the daemon's), so we use the
+    // recorded `host_pgid`. We only signal it when the daemon pid is dead AND the host
+    // group leader is still alive (so we never killpg a recycled stranger's group).
+    if !pid_alive(pf.pid)
+        && let Some(hpgid) = pf.host_pgid
+        && hpgid > 1
+        && pid_alive(hpgid)
+    {
+        let _ = nix::sys::signal::killpg(Pid::from_raw(hpgid), nix::sys::signal::Signal::SIGKILL);
+    }
+    let _ = std::fs::remove_file(&pidf);
+    let _ = std::fs::remove_file(&sockf);
 }
 
 /// The recorded daemon PID for `live_app`, if a pidfile exists (parses regardless of
@@ -231,6 +290,7 @@ pub fn run_daemon(params: DaemonParams, ctx: &Ctx) -> CmdResult<()> {
         host_module: target.eh_mod.clone(),
         eh_node: target.eh_node.clone(),
         started_at: now_ms(),
+        host_pgid: None,
     };
     write_pidfile(ctx, &pf)?;
 
@@ -251,6 +311,14 @@ pub fn run_daemon(params: DaemonParams, ctx: &Ctx) -> CmdResult<()> {
     let session = format!("{}", now_ms());
     let sink = LogSink::open(ctx, &session)?;
 
+    // Install SIGTERM/SIGINT/SIGHUP handlers so a kill (logout, shutdown, `kill <pid>`)
+    // runs the SAME host-teardown + unlink cleanup instead of dying by default action
+    // and orphaning the host (finding #9). Rust Drop does NOT run on signal death, so
+    // the accept loop polls a flag the handler sets and falls through to cleanup. (A
+    // `kill -9` is still uncatchable by design — the next `dev start` reaps that orphan
+    // via the recorded host_pgid.)
+    install_shutdown_signals();
+
     // Build the shared daemon state and launch the initial host.
     let state = Arc::new(DaemonState::new(target, sink, ctx.clone()));
     state.launch_initial();
@@ -259,15 +327,43 @@ pub fn run_daemon(params: DaemonParams, ctx: &Ctx) -> CmdResult<()> {
     let sup_state = Arc::clone(&state);
     let supervisor = std::thread::spawn(move || sup_state.supervise());
 
-    // Run the accept loop until shutdown.
+    // Run the accept loop until shutdown (an IPC `Shutdown` OR a caught signal).
     serve_until_shutdown(listener, Arc::clone(&state));
 
-    // Shutdown: stop the host, join the supervisor, unlink socket + pidfile.
+    // Shutdown: mark the flag (so the supervisor stops respawning), stop the host, join
+    // the supervisor, unlink socket + pidfile.
+    state.shutdown.store(true, Ordering::SeqCst);
     state.stop_host();
     let _ = supervisor.join();
     let _ = std::fs::remove_file(&params.sock);
     let _ = std::fs::remove_file(pid_path(ctx, pf.live_app.as_path()));
     Ok(())
+}
+
+/// A process-global flag a signal handler sets to request shutdown (finding #9). The
+/// accept loop polls it; signal handlers must touch only async-signal-safe state, so
+/// this is the entire handler body.
+static SIGNAL_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_shutdown_signal(_sig: libc::c_int) {
+    SIGNAL_SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+/// Install the catchable-shutdown signal handlers (SIGTERM/SIGINT/SIGHUP). Best-effort:
+/// a failed install leaves the default action (the pre-fix behavior) for that signal.
+fn install_shutdown_signals() {
+    use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, sigaction};
+    let action = SigAction::new(
+        SigHandler::Handler(on_shutdown_signal),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    for sig in [Signal::SIGTERM, Signal::SIGINT, Signal::SIGHUP] {
+        // SAFETY: the handler only stores into a static AtomicBool (async-signal-safe).
+        unsafe {
+            let _ = sigaction(sig, &action);
+        }
+    }
 }
 
 /// `dev start --foreground`: supervise the host in-process, attached to the TTY (the
@@ -350,6 +446,13 @@ struct DaemonState {
     full_set: Mutex<Vec<RegistryEntry>>,
     /// The transient working set (`SetWorkingSet`); `None` = the full enabled set.
     working_set: Mutex<Option<Vec<String>>>,
+    /// The connection id that owns the current transient working set (the active
+    /// watch/`dev --only` session). The working set is documented transient — "for this
+    /// session" (DESIGN §3.3) — so when that connection drops we reset the scope back to
+    /// the full enabled set (finding #3). `0` = no owner (the set is the full set).
+    working_set_owner: AtomicU64,
+    /// Monotonic source of per-connection ids (so the owning session is identifiable).
+    next_conn_id: AtomicU64,
     /// Extensions dropped by the pre-filter, with reasons (for `status`).
     skipped: Mutex<Vec<(String, String)>>,
     /// The inspector endpoint, when enabled.
@@ -366,6 +469,8 @@ impl DaemonState {
             host: Mutex::new(None),
             full_set: Mutex::new(Vec::new()),
             working_set: Mutex::new(None),
+            working_set_owner: AtomicU64::new(0),
+            next_conn_id: AtomicU64::new(1),
             skipped: Mutex::new(Vec::new()),
             inspect: Mutex::new(None),
             shutdown: AtomicBool::new(false),
@@ -398,6 +503,7 @@ impl DaemonState {
                 // auto-respawn a never-started host (only a crashed one).
             }
         }
+        self.record_host_pgid();
     }
 
     /// Build + deploy each kept `source = dist` registry entry into the User Library so the
@@ -425,7 +531,7 @@ impl DaemonState {
         let project = crate::manifest::Project::discover(root)?;
         let mut quiet = self.ctx.clone();
         quiet.cwd = project.root.clone();
-        quiet.json = true;
+        quiet.quiet = true;
         let args = crate::cli::DeployArgs {
             release: false,
             undo: false,
@@ -548,6 +654,10 @@ impl DaemonState {
             }
         };
 
+        // The reload respawned the host into a fresh process group — record its new pgid
+        // so an orphan reaper after a `-9`'d daemon kills the right group (finding #9).
+        self.record_host_pgid();
+
         match outcome {
             Ok(o) => Response::ReloadResult {
                 ok: o.failed.is_empty(),
@@ -666,7 +776,13 @@ impl DaemonState {
         }
     }
 
-    fn set_working_set(&self, names: Option<Vec<String>>) -> Response {
+    fn set_working_set(&self, names: Option<Vec<String>>, owner: u64) -> Response {
+        // Record (or release) ownership so the set resets when the owning session drops
+        // (finding #3): a scoped `Some` is owned by this connection; a `None` clears it.
+        match &names {
+            Some(_) => self.working_set_owner.store(owner, Ordering::SeqCst),
+            None => self.working_set_owner.store(0, Ordering::SeqCst),
+        }
         *self.working_set.lock().unwrap() = names.clone();
         // An implicit reload applies the new set (SPEC D §2).
         let _ = self.do_reload(None, false);
@@ -679,6 +795,45 @@ impl DaemonState {
             ),
             restarted: None,
             inspector: None,
+        }
+    }
+
+    /// Rewrite the pidfile to record the CURRENT host child's process-group id (or clear
+    /// it), so a `dev start` after a `-9`'d daemon can reap the orphaned host (finding
+    /// #9/#11). Best-effort: a write failure just leaves the prior value.
+    fn record_host_pgid(&self) {
+        let host_pgid = self
+            .host
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|h| h.pgid().as_raw());
+        let live_app = self.target.app();
+        if let Some(mut pf) = read_pidfile(&self.ctx, live_app) {
+            pf.host_pgid = host_pgid;
+            let _ = write_pidfile(&self.ctx, &pf);
+        }
+    }
+
+    /// A connection closed. If it owned the transient working set (the active
+    /// watch/`dev --only` session), reset the scope back to the full enabled set and
+    /// reload, so a later plain `dev reload` from another terminal operates on the full
+    /// set rather than the dead session's scope (finding #3, DESIGN §3.3 "transient").
+    fn connection_closed(&self, conn_id: u64) {
+        if conn_id == 0 || self.shutdown.load(Ordering::SeqCst) {
+            return;
+        }
+        // Atomically claim ownership-release: only the owner resets, and only once.
+        if self
+            .working_set_owner
+            .compare_exchange(conn_id, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let had_scope = self.working_set.lock().unwrap().is_some();
+            *self.working_set.lock().unwrap() = None;
+            if had_scope {
+                let _ = self.do_reload(None, false);
+            }
         }
     }
 
@@ -727,17 +882,24 @@ impl DaemonState {
                         if self.shutdown.load(Ordering::SeqCst) {
                             return;
                         }
-                        let mut g = self.host.lock().unwrap();
-                        if let Some(h) = g.as_mut() {
-                            let _ = h.respawn();
+                        {
+                            let mut g = self.host.lock().unwrap();
+                            if let Some(h) = g.as_mut() {
+                                let _ = h.respawn();
+                            }
                         }
+                        // The respawn made a new process group — re-record it.
+                        self.record_host_pgid();
                     }
                     RespawnDecision::PromptTty => {
                         // The detached daemon has no TTY; treat as a respawn fallback.
-                        let mut g = self.host.lock().unwrap();
-                        if let Some(h) = g.as_mut() {
-                            let _ = h.respawn();
+                        {
+                            let mut g = self.host.lock().unwrap();
+                            if let Some(h) = g.as_mut() {
+                                let _ = h.respawn();
+                            }
                         }
+                        self.record_host_pgid();
                     }
                     RespawnDecision::GaveUpCrashLooping => {
                         // Leave the host in CrashLooping; wait for an explicit reload.
@@ -760,7 +922,7 @@ impl ipc::Handler for DaemonState {
             },
             Request::Status => self.status_response(),
             Request::Reload { only, strict } => self.do_reload(only, strict),
-            Request::SetWorkingSet { names } => self.set_working_set(names),
+            Request::SetWorkingSet { names } => self.set_working_set(names, conn.conn_id()),
             Request::SetInspect { enable, host, port } => self.set_inspect(enable, host, port),
             Request::Logs {
                 name,
@@ -815,6 +977,9 @@ impl DaemonState {
         let want_level = level.as_deref();
         loop {
             if self.shutdown.load(Ordering::SeqCst) || conn.stop_requested() {
+                // Terminate the client's stream iterator cleanly (a `StopStream`-driven
+                // cancel, finding #13) so its blocking read returns instead of hanging.
+                let _ = conn.send(Response::LogEnd);
                 break;
             }
             match rx.recv_timeout(Duration::from_millis(250)) {
@@ -856,6 +1021,12 @@ fn serve_until_shutdown(listener: UnixListener, state: Arc<DaemonState>) {
         .set_nonblocking(true)
         .expect("set listener nonblocking");
     while !state.shutdown.load(Ordering::SeqCst) {
+        // A caught SIGTERM/SIGINT/SIGHUP requests shutdown too (finding #9): mirror it
+        // into the state flag so the normal teardown path in run_daemon runs.
+        if SIGNAL_SHUTDOWN.load(Ordering::SeqCst) {
+            state.shutdown.store(true, Ordering::SeqCst);
+            break;
+        }
         match listener.accept() {
             Ok((stream, _)) => {
                 // macOS (BSD) `accept(2)` inherits the listener's O_NONBLOCK onto the
@@ -877,25 +1048,46 @@ fn serve_until_shutdown(listener: UnixListener, state: Arc<DaemonState>) {
     }
 }
 
+/// The maximum bytes a single request line may occupy before we reject the connection.
+/// A request is a small JSON object; anything past this is malformed or hostile (a
+/// never-newline-terminated stream that would otherwise buffer unboundedly and OOM the
+/// daemon — finding #12). 64 KiB is generous for the largest legitimate request
+/// (a `set_working_set` / `reload` with many names).
+const MAX_REQUEST_LINE: u64 = 64 * 1024;
+
 /// Handle one client connection: decode each JSON-Lines request, version-check it, and
 /// dispatch to the handler. A streaming handler writes many lines then returns.
+///
+/// A dedicated reader thread owns the input half so a mid-stream `StopStream` (which
+/// arrives as the NEXT request line while the connection's `stream_logs` is blocked
+/// delivering log lines) can flip the in-flight stream's stop flag promptly instead of
+/// hanging until the client disconnects (finding #13). The reader forwards every other
+/// request to the main loop over a channel. Both the reader thread and the main loop
+/// cap each line at `MAX_REQUEST_LINE` (finding #12).
 fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) {
-    use std::io::{BufRead, BufReader};
     let Ok(writer) = stream.try_clone() else {
         return;
     };
+    let conn_id = state.next_conn_id.fetch_add(1, Ordering::SeqCst);
+    let stop = Arc::new(AtomicBool::new(false));
     let mut sink = ConnSink {
         writer,
-        stop: Arc::new(AtomicBool::new(false)),
+        stop: Arc::clone(&stop),
+        conn_id,
     };
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let Ok(line) = line else { break };
-        if line.trim().is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<ipc::RequestEnvelope>(&line) {
-            Ok(env) => {
+
+    // The reader thread: parse request lines, set `stop` on a StopStream, and forward
+    // everything else to the main loop. Channel send failure (main loop gone) ends it.
+    let (tx, rx) = std::sync::mpsc::channel::<ReaderMsg>();
+    let stop_for_reader = Arc::clone(&stop);
+    let reader_handle = std::thread::spawn(move || {
+        read_requests(stream, &tx, &stop_for_reader);
+    });
+
+    use ipc::Handler;
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            ReaderMsg::Request(env) => {
                 if env.v != DEV_PROTOCOL_VERSION {
                     let _ = sink.send(Response::Error {
                         code: ErrorCode::ProtocolMismatch.as_str().to_string(),
@@ -905,17 +1097,92 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) {
                     });
                     break;
                 }
-                use ipc::Handler;
                 state.handle(env.request, &mut sink);
                 if state.shutdown.load(Ordering::SeqCst) {
                     break;
                 }
             }
-            Err(_) => {
+            ReaderMsg::Malformed => {
                 let _ = sink.send(Response::Error {
                     code: ErrorCode::ProtocolMismatch.as_str().to_string(),
                     msg: "malformed request".to_string(),
                 });
+            }
+            ReaderMsg::Oversize => {
+                let _ = sink.send(Response::Error {
+                    code: ErrorCode::ProtocolMismatch.as_str().to_string(),
+                    msg: "request line too large".to_string(),
+                });
+                break;
+            }
+            ReaderMsg::Eof => break,
+        }
+    }
+
+    // The client went away (or we broke out): reset any session-scoped state this
+    // connection owned, then join the reader.
+    state.connection_closed(conn_id);
+    stop.store(true, Ordering::SeqCst);
+    let _ = reader_handle.join();
+}
+
+/// A message from the per-connection reader thread to the dispatch loop.
+enum ReaderMsg {
+    Request(ipc::RequestEnvelope),
+    Malformed,
+    Oversize,
+    Eof,
+}
+
+/// The reader half of a connection: read length-capped JSON-Lines, intercept
+/// `StopStream` (flip `stop` so an in-flight `stream_logs` cancels promptly), and
+/// forward everything else to the dispatch loop. Returns when the stream ends, a line
+/// overflows, or the dispatch loop is gone.
+fn read_requests(
+    stream: UnixStream,
+    tx: &std::sync::mpsc::Sender<ReaderMsg>,
+    stop: &Arc<AtomicBool>,
+) {
+    use std::io::{BufRead, BufReader, Read};
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        // Cap the read so an unterminated stream can't buffer unboundedly (finding #12).
+        let mut limited = (&mut reader).take(MAX_REQUEST_LINE + 1);
+        let n = match limited.read_line(&mut line) {
+            Ok(n) => n,
+            Err(_) => {
+                let _ = tx.send(ReaderMsg::Eof);
+                return;
+            }
+        };
+        if n == 0 {
+            let _ = tx.send(ReaderMsg::Eof);
+            return;
+        }
+        if n as u64 > MAX_REQUEST_LINE && !line.ends_with('\n') {
+            let _ = tx.send(ReaderMsg::Oversize);
+            return;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ipc::RequestEnvelope>(&line) {
+            Ok(env) => {
+                // Intercept a mid-stream cancel: flip the stop flag for the in-flight
+                // stream WITHOUT routing through the (blocked) dispatch loop (finding #13).
+                if matches!(env.request, ipc::Request::StopStream) {
+                    stop.store(true, Ordering::SeqCst);
+                    continue;
+                }
+                if tx.send(ReaderMsg::Request(env)).is_err() {
+                    return;
+                }
+            }
+            Err(_) => {
+                if tx.send(ReaderMsg::Malformed).is_err() {
+                    return;
+                }
             }
         }
     }
@@ -925,6 +1192,7 @@ fn handle_conn(stream: UnixStream, state: Arc<DaemonState>) {
 struct ConnSink {
     writer: UnixStream,
     stop: Arc<AtomicBool>,
+    conn_id: u64,
 }
 
 impl ResponseSink for ConnSink {
@@ -946,8 +1214,77 @@ impl ResponseSink for ConnSink {
     fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
     }
+
+    fn conn_id(&self) -> u64 {
+        self.conn_id
+    }
 }
 
 fn conn_io(e: std::io::Error) -> RkError {
     RkError::of(ErrorCode::NoDaemon, "lost a dev host connection", "retry").raw(e.into())
+}
+
+/// An advisory exclusive start lock (`O_CREAT|O_EXCL`) serializing concurrent `dev
+/// start`s for one Live (finding #11). Held across the is-running check + re-exec +
+/// wait-until-up, so a second start observes the first daemon and reuses it. A stale
+/// lockfile (its recorded pid is dead) is reclaimed; on a timeout we proceed anyway
+/// (degrading to the old behavior rather than failing a legitimate start). Released on
+/// drop.
+struct StartLock {
+    path: Option<PathBuf>,
+}
+
+impl StartLock {
+    fn acquire(path: &Path) -> StartLock {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+            {
+                Ok(mut f) => {
+                    let _ = write!(f, "{}", std::process::id());
+                    return StartLock {
+                        path: Some(path.to_path_buf()),
+                    };
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if Self::is_stale(path) {
+                        let _ = std::fs::remove_file(path);
+                        continue;
+                    }
+                    if Instant::now() >= deadline {
+                        // Couldn't take it — proceed without the guard (best-effort).
+                        return StartLock { path: None };
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                // Any other error: skip the lock rather than block a start.
+                Err(_) => return StartLock { path: None },
+            }
+        }
+    }
+
+    /// A lockfile is stale if its recorded pid is no longer alive.
+    fn is_stale(path: &Path) -> bool {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return false;
+        };
+        match text.trim().parse::<i32>() {
+            Ok(pid) => !pid_alive(pid),
+            Err(_) => true,
+        }
+    }
+}
+
+impl Drop for StartLock {
+    fn drop(&mut self) {
+        if let Some(path) = &self.path {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }

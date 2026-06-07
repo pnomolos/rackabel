@@ -132,6 +132,17 @@ impl Registry {
         })
     }
 
+    /// The existing entry registered at `path` (canonicalized comparison), if any —
+    /// the idempotency guard for single-path `dev register` (the same canonical-path
+    /// comparison `add_recursive`/`remove`/`find` use). A path that can't be
+    /// canonicalized (e.g. doesn't exist) is compared lexically.
+    pub fn find_by_path(&self, path: &Path) -> Option<&RegistryEntry> {
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        self.entries
+            .iter()
+            .find(|e| std::fs::canonicalize(&e.path).unwrap_or_else(|_| e.path.clone()) == target)
+    }
+
     /// The set of names already taken (for disambiguation).
     fn taken_names(&self) -> HashSet<String> {
         self.entries.iter().map(|e| e.name.clone()).collect()
@@ -529,9 +540,10 @@ fn basename(p: &Path) -> String {
 
 fn not_found(what: &str) -> RkError {
     RkError::of(
-        ErrorCode::NoDaemon,
+        ErrorCode::NoSuchExtension,
         format!("no registry entry named or at `{what}`"),
-        "run `rackabel dev list` to see registered extensions",
+        "run `rackabel dev list` to see registered extensions, \
+         or `rackabel dev register <path>` to add one",
     )
     .at(what.to_string())
 }
@@ -628,6 +640,7 @@ mod tests {
         Ctx {
             no_input: true,
             json: false,
+            quiet: false,
             verbose: false,
             raw: false,
             color: crate::ui::color::ColorMode::Never,
@@ -883,6 +896,28 @@ mod tests {
         let (kept, skipped) = Registry::prefilter(&entries, &host);
         assert_eq!(kept.len(), 1);
         assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn find_by_path_matches_canonical_and_misses_use_no_such_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let proj = tmp.path().join("ext");
+        write_project(&proj, None);
+        let mut reg = Registry::load(&ctx).unwrap();
+        reg.add(&proj, None, false, &ctx).unwrap();
+        // The same path resolves to the existing entry (idempotency guard, finding #6).
+        assert_eq!(reg.find_by_path(&proj).unwrap().name, "ext");
+        // An unregistered path is None.
+        assert!(
+            reg.find_by_path(tmp.path().join("nope").as_path())
+                .is_none()
+        );
+        // A miss in the mutating verbs is a usage error (RK0102), NOT NoDaemon (#7).
+        let err = reg.set_enabled("nope", false).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NoSuchExtension);
+        let err = reg.remove("nope", false).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NoSuchExtension);
     }
 
     #[test]

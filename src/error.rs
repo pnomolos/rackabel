@@ -42,6 +42,12 @@ pub enum ErrorCode {
     /// the error, so `rackabel explain` returns relevant prose instead of an unrelated
     /// validation entry.
     UsageError,
+    /// A registry verb (`dev enable`/`disable`/`unregister`/`reload`) named or pointed
+    /// at an extension that isn't in the registry — a usage mistake (a typo'd name or a
+    /// wrong path), NOT a daemon problem. These verbs work without a daemon, so the
+    /// old `RK0309 NoDaemon` (exit 3, "start the dev host") was the wrong class AND the
+    /// wrong remedy; this is a usage error (exit 2) whose remedy points at `dev list`.
+    NoSuchExtension,
     // -- toolkit (exit 3) --
     /// Extensions toolkit (SDK/CLI tarball) not found.
     ToolkitNotFound,
@@ -115,6 +121,7 @@ impl ErrorCode {
             Self::AmbiguousKind => "RK0002",
             Self::ManifestParse => "RK0003",
             Self::UsageError => "RK0101",
+            Self::NoSuchExtension => "RK0102",
             Self::ToolkitNotFound => "RK0201",
             Self::ToolkitVersionMismatch => "RK0202",
             Self::UserLibraryAmbiguous => "RK0301",
@@ -155,7 +162,7 @@ impl ErrorCode {
     /// The exit class this code maps to. Keeps the frame and the exit code in sync.
     pub fn class(self) -> ExitClass {
         match self {
-            Self::UsageError => ExitClass::Usage,
+            Self::UsageError | Self::NoSuchExtension => ExitClass::Usage,
             Self::NoManifest
             | Self::AmbiguousKind
             | Self::ManifestParse
@@ -199,6 +206,7 @@ impl ErrorCode {
         Self::AmbiguousKind,
         Self::ManifestParse,
         Self::UsageError,
+        Self::NoSuchExtension,
         Self::ToolkitNotFound,
         Self::ToolkitVersionMismatch,
         Self::UserLibraryAmbiguous,

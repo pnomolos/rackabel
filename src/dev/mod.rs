@@ -310,6 +310,14 @@ pub fn host_out_path(ctx: &Ctx, live_app: &Path) -> PathBuf {
     daemon_dir(ctx).join(format!("{}.out", live_hash(live_app)))
 }
 
+/// The start-serialization lockfile for the daemon serving `live_app`. `dev start`
+/// holds this exclusively across the is-running check + re-exec + wait-until-up so two
+/// concurrent starts can't each spawn a daemon+host (the racing-start orphan, finding
+/// #11).
+pub fn start_lock_path(ctx: &Ctx, live_app: &Path) -> PathBuf {
+    daemon_dir(ctx).join(format!("{}.start.lock", live_hash(live_app)))
+}
+
 /// A uniform "this dev-host surface isn't implemented yet" frame for the foundation
 /// stubs. Each agent replaces its own stubs; until then every dev-host code path
 /// fails with a clear, framed message (never a panic or a silent no-op).

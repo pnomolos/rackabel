@@ -374,6 +374,11 @@ fn report_success(
     report: &native_dep::NativeDepReport,
     ctx: &Ctx,
 ) {
+    // The in-process dev-watch chain sets `quiet` so it owns the single chain line —
+    // emit nothing here (neither the human frame nor the JSON envelope).
+    if ctx.quiet {
+        return;
+    }
     if ctx.json {
         let v = json!({
             "ok": true,

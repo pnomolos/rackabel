@@ -61,13 +61,6 @@ fn wait_for_daemon(home: &Path) -> Option<i32> {
     None
 }
 
-fn force_stop(home: &Path, cwd: &Path, live: &Path) {
-    let _ = dev_cmd(home, cwd, live).args(["dev", "stop"]).output();
-    if let Some(pid) = read_daemon_pid(home) {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-    }
-}
-
 /// Write one persisted session-log record (`ts\tlevel\tkind\text\ttext`) for the
 /// fallback to read. `ext = None` writes to the shared `_session` stream.
 fn seed_record(
@@ -106,6 +99,7 @@ fn logs_reads_per_extension_sink_with_daemon_up() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     // The FakeHost emits `[petri]:` liveness lines; the daemon attributes + persists them
@@ -137,8 +131,6 @@ fn logs_reads_per_extension_sink_with_daemon_up() {
         .assert()
         .success()
         .stdout(predicate::str::contains("petri"));
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 // --- dead-daemon file fallback -------------------------------------------------

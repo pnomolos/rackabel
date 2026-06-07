@@ -25,6 +25,12 @@ pub struct Ctx {
     pub no_input: bool,
     /// `--json`: structured output requested (commands that support it honor it).
     pub json: bool,
+    /// Internal: suppress ALL stdout reporting from a reused service (build/deploy),
+    /// without claiming `--json`. Set ONLY by the in-process dev-watch chain so the
+    /// reused 0.2 `esbuild::build_extension` / `deploy::run` services emit neither
+    /// their human frames NOR a JSON envelope — the chain owns the single
+    /// `rebuilt … → reloaded` line. Never set from a CLI flag. (See DEVIATIONS D-66.)
+    pub quiet: bool,
     /// `--verbose`: show developer-facing internals.
     pub verbose: bool,
     /// `--raw`: show raw host/Node output and the error chain behind frames.
@@ -84,6 +90,7 @@ impl Ctx {
         Self {
             no_input: g.no_input,
             json: g.json,
+            quiet: false,
             verbose: g.verbose,
             raw: g.raw,
             color,
@@ -111,9 +118,10 @@ impl Ctx {
     }
 
     /// Whether informational echoes (inference notes, resolution lines) should be
-    /// printed. Suppressed under `--json` so machine output stays clean.
+    /// printed. Suppressed under `--json` so machine output stays clean, and under
+    /// `quiet` so the in-process dev-watch chain owns its own single line.
     pub fn echo_on(&self) -> bool {
-        !self.json
+        !self.json && !self.quiet
     }
 }
 

@@ -205,12 +205,23 @@ fn glob_build_err(e: globset::Error) -> RkError {
 }
 
 /// Whether a changed path is an input we should rebuild on: it matches a source glob and
-/// is not under a `dist/` or `node_modules/` segment (the build output / dep churn).
+/// is not under a `dist/` or `node_modules/` segment (the build output / dep churn), and
+/// is not a rackabel-GENERATED artifact at a project root.
+///
+/// `manifest.json` is the trap here (finding #2): the build step writes it at the project
+/// root from `rackabel.toml`, and it matches the `**/*.json` source glob and lives OUTSIDE
+/// `dist/`. Treating it as an input means every chain run's own manifest write re-triggers
+/// the chain — a self-write feedback loop that fires the whole build→deploy→reload twice
+/// for one save. It is a build OUTPUT (rackabel.toml is the source of truth), so exclude it.
 fn is_source_input(path: &Path, globs: &globset::GlobSet) -> bool {
     if path
         .components()
         .any(|c| matches!(c.as_os_str().to_str(), Some("dist") | Some("node_modules")))
     {
+        return false;
+    }
+    // The generated manifest is an output, not an input (rackabel.toml drives it).
+    if path.file_name().and_then(|s| s.to_str()) == Some("manifest.json") {
         return false;
     }
     globs.is_match(path)
@@ -505,15 +516,15 @@ fn deploy_project(project: &Project, ctx: &Ctx) -> CmdResult<()> {
     crate::commands::deploy::run(&args, ctx)
 }
 
-/// A project-rooted clone of `ctx` with `json` set so the reused build/deploy services
-/// stay quiet (they emit a single machine line under `json`, never the human frames the
-/// chain owns). INTEGRATOR NOTE: a dedicated `quiet` ctx flag (or a `pub(crate)`
-/// quiet-deploy seam in `commands::deploy`) would be cleaner than overloading `json`;
-/// recorded as a deviation candidate.
+/// A project-rooted clone of `ctx` with the dedicated `quiet` flag set so the reused
+/// 0.2 build/deploy services emit NOTHING — neither their human frames nor a JSON
+/// envelope — leaving the chain's single `rebuilt … → reloaded` line as the only
+/// output a musician sees (DESIGN §6.2, DEVIATIONS D-66). `json` is left at the
+/// caller's value (normally `false`); `quiet` suppresses both paths.
 fn quiet_project_ctx(ctx: &Ctx, root: &Path) -> Ctx {
     let mut c = ctx.clone();
     c.cwd = root.to_path_buf();
-    c.json = true;
+    c.quiet = true;
     c
 }
 
@@ -929,6 +940,7 @@ mod tests {
         Ctx {
             no_input: true,
             json: false,
+            quiet: false,
             verbose: false,
             raw: false,
             color: crate::ui::color::ColorMode::Never,
@@ -1111,6 +1123,27 @@ mod tests {
             vec!["clip-renamer".to_string()],
             "a canonical change path must match a symlinked registry root"
         );
+    }
+
+    #[test]
+    fn classify_ignores_generated_manifest_write() {
+        // REGRESSION (finding #2): the build step writes manifest.json at the project
+        // root (it matches `**/*.json` and lives OUTSIDE dist/). If that counted as an
+        // input, each chain run's own manifest write would re-trigger the chain — one
+        // save → two whole-host reloads (a self-write feedback loop). It is an OUTPUT.
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("clip-renamer");
+        std::fs::create_dir_all(&ext).unwrap();
+        let ctx = ctx_for(tmp.path());
+        let p = plan(&[entry("clip-renamer", &ext)], &ctx).unwrap();
+        let cs = p.classify(&[ext.join("manifest.json")]);
+        assert!(
+            cs.is_empty(),
+            "a generated manifest.json write must not be actionable"
+        );
+        // A genuinely-edited source JSON (e.g. a data file under src/) still triggers.
+        let cs2 = p.classify(&[ext.join("src/data.json")]);
+        assert_eq!(cs2.affected_names(), vec!["clip-renamer".to_string()]);
     }
 
     #[test]

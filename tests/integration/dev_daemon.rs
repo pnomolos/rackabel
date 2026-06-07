@@ -96,19 +96,12 @@ fn sock_call(sock: &Path, request_json: &str) -> String {
     line
 }
 
-/// Best-effort teardown so a failed test never leaks a daemon/host.
-fn force_stop(home: &Path, cwd: &Path, live: &Path) {
-    let _ = dev_cmd(home, cwd, live).args(["dev", "stop"]).output();
-    if let Some(pid) = read_daemon_pid(home) {
-        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
-    }
-}
-
 #[test]
 fn start_status_stop_lifecycle() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     // dev start → daemon comes up.
@@ -151,8 +144,6 @@ fn start_status_stop_lifecycle() {
         !pid_alive(pid),
         "daemon (and host group) must be gone after stop"
     );
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 #[test]
@@ -160,6 +151,7 @@ fn double_start_is_idempotent() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     dev_cmd(home.path(), work.path(), live.app_path())
@@ -175,8 +167,6 @@ fn double_start_is_idempotent() {
         .success();
     let pid2 = read_daemon_pid(home.path()).expect("second read");
     assert_eq!(pid1, pid2, "double-start must reuse the running daemon");
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 #[test]
@@ -184,6 +174,7 @@ fn stop_without_daemon_is_no_daemon() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     dev_cmd(home.path(), work.path(), live.app_path())
@@ -199,6 +190,7 @@ fn stale_pidfile_is_reclaimed() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     // Start once to learn the per-Live hash filename, then stop, then forge a stale
@@ -243,8 +235,6 @@ fn stale_pidfile_is_reclaimed() {
         .stdout(predicate::str::contains("dev host running"));
     let pid = wait_for_daemon(home.path()).expect("fresh daemon after reclaim");
     assert!(pid_alive(pid));
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 #[test]
@@ -252,6 +242,7 @@ fn no_input_dev_mode_off_is_environment_exit_3() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
 
     // Live up but Dev Mode off + --no-input ⇒ deterministic exit 3 RK0306 (no hang).
     rackabel_cmd(home.path(), work.path())
@@ -271,6 +262,7 @@ fn no_input_live_down_is_environment_exit_3() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
 
     rackabel_cmd(home.path(), work.path())
         .env("RACKABEL_HOST_CMD", fakehost_bin())
@@ -287,6 +279,7 @@ fn socket_round_trip_ping_reload_and_bad_version() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     dev_cmd(home.path(), work.path(), live.app_path())
@@ -312,8 +305,6 @@ fn socket_round_trip_ping_reload_and_bad_version() {
     // a bad protocol version is rejected with RK0308 and the connection closed.
     let bad = sock_call(&sock, r#"{"v":999,"type":"ping"}"#);
     assert!(bad.contains("RK0308"), "got: {bad}");
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 /// REGRESSION: several requests on ONE persistent connection (what the bare-`dev`/watch
@@ -329,6 +320,7 @@ fn multiple_requests_on_one_connection() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     dev_cmd(home.path(), work.path(), live.app_path())
@@ -362,8 +354,6 @@ fn multiple_requests_on_one_connection() {
     assert!(r2.contains("\"type\":\"status\""), "2nd: {r2}");
     let r3 = call(r#"{"v":1,"type":"ping"}"#);
     assert!(r3.contains("\"type\":\"pong\""), "3rd: {r3}");
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 #[test]
@@ -371,6 +361,7 @@ fn crash_looping_is_reported_by_status() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     // A connect-then-crash host: the daemon sees Running, then crash-recovers with
@@ -399,8 +390,6 @@ fn crash_looping_is_reported_by_status() {
         saw_crash_looping,
         "status should eventually report crash_looping"
     );
-
-    force_stop(home.path(), work.path(), live.app_path());
 }
 
 #[test]
@@ -408,6 +397,7 @@ fn status_without_daemon_is_no_daemon_exit_3() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
     let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
+    let _guard = DaemonGuard::new(home.path(), work.path(), live.app_path());
     std::fs::create_dir_all(home.path().join("UserLibrary/Extensions")).unwrap();
 
     dev_cmd(home.path(), work.path(), live.app_path())

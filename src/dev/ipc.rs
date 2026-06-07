@@ -8,7 +8,7 @@
 //! against a stable wire form. No async runtime — std threads cover the single-daemon,
 //! few-clients load and match the rest of the codebase.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -296,6 +296,12 @@ pub trait ResponseSink: Send {
     fn stop_requested(&self) -> bool {
         false
     }
+    /// A per-connection id, so the handler can tie session-scoped state (the transient
+    /// working set) to the connection that set it and reset it when that connection
+    /// drops. `0` = an anonymous/one-shot connection (the default sink).
+    fn conn_id(&self) -> u64 {
+        0
+    }
 }
 
 /// The daemon's request handler. Implemented by daemon-core (over `host.rs`/
@@ -338,15 +344,32 @@ pub fn serve(listener: UnixListener, handler: Arc<dyn Handler>) -> CmdResult<()>
     Ok(())
 }
 
+/// The maximum bytes one request line may occupy before the connection is rejected —
+/// a small JSON object; anything larger is malformed or hostile (an unterminated stream
+/// would otherwise buffer unboundedly, finding #12). Mirrors the daemon's own cap.
+const MAX_REQUEST_LINE: u64 = 64 * 1024;
+
 fn handle_connection(stream: UnixStream, handler: Arc<dyn Handler>) -> CmdResult<()> {
     let writer = stream.try_clone().map_err(io_err)?;
     let mut sink = StreamSink { writer };
-    let reader = BufReader::new(stream);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
+    let mut reader = BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        let mut limited = (&mut reader).take(MAX_REQUEST_LINE + 1);
+        let n = match limited.read_line(&mut line) {
+            Ok(n) => n,
             Err(_) => break,
         };
+        if n == 0 {
+            break;
+        }
+        if n as u64 > MAX_REQUEST_LINE && !line.ends_with('\n') {
+            let _ = sink.send(Response::Error {
+                code: ErrorCode::ProtocolMismatch.as_str().to_string(),
+                msg: "request line too large".to_string(),
+            });
+            break;
+        }
         if line.trim().is_empty() {
             continue;
         }

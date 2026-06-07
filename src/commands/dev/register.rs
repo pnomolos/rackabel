@@ -59,6 +59,20 @@ pub fn run(args: &DevRegisterArgs, ctx: &Ctx) -> CmdResult<()> {
         return Ok(());
     }
 
+    // Idempotency: registering a path that is ALREADY in the registry is a no-op, not a
+    // second entry under a derived name (finding #6). `add_recursive` already de-dupes
+    // by canonical path; the single-path branch must too.
+    if let Some(existing) = reg.find_by_path(&path) {
+        if ctx.echo_on() {
+            ui::frame::emit(
+                ui::frame::Symbol::Good,
+                &format!("{} is already registered", existing.name),
+                ctx,
+            );
+        }
+        return Ok(());
+    }
+
     // Single-path register. Resolve the candidate name + collision policy up front so
     // we can echo a disambiguation / warn on a forced verb / raise RK0312.
     let basename = path

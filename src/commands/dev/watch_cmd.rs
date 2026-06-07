@@ -217,6 +217,7 @@ mod tests {
         Ctx {
             no_input: true,
             json: false,
+            quiet: false,
             verbose: false,
             raw: false,
             color: crate::ui::color::ColorMode::Never,

@@ -35,6 +35,7 @@ fn short_title(code: ErrorCode) -> &'static str {
         ErrorCode::AmbiguousKind => "Project has both or neither [extension]/[device]",
         ErrorCode::ManifestParse => "rackabel.toml could not be parsed",
         ErrorCode::UsageError => "Command invoked incorrectly",
+        ErrorCode::NoSuchExtension => "No registered extension by that name or path",
         ErrorCode::ToolkitNotFound => "Extensions toolkit (SDK/CLI) not found",
         ErrorCode::ToolkitVersionMismatch => "Toolkit version mismatch vs [toolchain].sdk",
         ErrorCode::UserLibraryAmbiguous => "Multiple User Libraries; cannot pick under --no-input",
@@ -87,6 +88,20 @@ fn long_form(code: ErrorCode) -> &'static str {
              To fix:\n\
                - follow the `help:` line printed with the error, or\n\
                - run `rackabel <command> --help` to see the command's accepted arguments."
+        }
+        ErrorCode::NoSuchExtension => {
+            "A `dev` registry verb named or pointed at an extension that is not in the\n\
+             registry — almost always a typo'd name or the wrong path.\n\
+             \n\
+             `dev enable`, `dev disable`, `dev unregister`, and `dev reload <name>`\n\
+             resolve their argument against ~/.rackabel/registry.toml (by name first,\n\
+             then by path). These verbs work WITHOUT a running dev host, so a miss here\n\
+             is a usage mistake (exit 2), not a daemon problem.\n\
+             \n\
+             To fix:\n\
+               - run `rackabel dev list` to see the registered names and paths, then\n\
+                 rerun with one of them, or\n\
+               - `rackabel dev register <path>` to add the extension first."
         }
         ErrorCode::NoManifest => {
             "rackabel looks for a rackabel.toml in the current directory and its\n\

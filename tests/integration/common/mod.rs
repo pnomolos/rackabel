@@ -253,6 +253,75 @@ pub fn vendor_esbuild_into(node: &Path, source_root: &Path, project_root: &Path)
     link.exists()
 }
 
+/// A panic-safe daemon teardown guard (finding #14). Binding one at the start of a
+/// daemon-spawning test guarantees the sandboxed `__daemon` + its FakeHost child are
+/// torn down on Drop — so an assertion panic mid-test still reaps them instead of
+/// leaking a detached process group. The body mirrors the old `force_stop`: a graceful
+/// `dev stop` (which killpg's the whole group), then a `kill -9` of the pidfile pid as a
+/// belt-and-suspenders for a daemon that ignored shutdown.
+///
+/// Drop runs even on `unwind`, which is exactly the case the trailing-`force_stop`
+/// pattern missed. Hold it by value for the whole test: `let _guard = DaemonGuard::new(…)`.
+pub struct DaemonGuard {
+    home: PathBuf,
+    cwd: PathBuf,
+    live: PathBuf,
+}
+
+impl DaemonGuard {
+    pub fn new(home: &Path, cwd: &Path, live: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            cwd: cwd.to_path_buf(),
+            live: live.to_path_buf(),
+        }
+    }
+
+    /// Read the per-Live daemon pid from the single `.pid` under the daemon dir.
+    fn pidfile_pid(&self) -> Option<i32> {
+        let dir = self.home.join(".rackabel/daemon");
+        for e in std::fs::read_dir(&dir).ok()?.flatten() {
+            if e.path().extension().and_then(|s| s.to_str()) == Some("pid") {
+                let text = std::fs::read_to_string(e.path()).ok()?;
+                let v: toml::Value = toml::from_str(&text).ok()?;
+                return v.get("pid").and_then(|p| p.as_integer()).map(|i| i as i32);
+            }
+        }
+        None
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        // Graceful stop (killpg's the daemon + host group).
+        let mut stop = rackabel_cmd(&self.home, &self.cwd);
+        stop.env("RACKABEL_HOST_CMD", fakehost_bin())
+            .env("RACKABEL_DOCTOR_LIVE_RUNNING", "1")
+            .env("RACKABEL_DEV_MODE", "1")
+            .env("ABLETON_APP", &self.live)
+            .env("ABLETON_USER_LIBRARY", self.home.join("UserLibrary"))
+            .args(["dev", "stop"]);
+        let _ = stop.output();
+        // Belt-and-suspenders: kill the pidfile pid only if it's still alive (avoid the
+        // `kill: <pid>: No such process` noise in the test transcript when `dev stop`
+        // already reaped it — minor #6). Stderr is discarded regardless.
+        if let Some(pid) = self.pidfile_pid() {
+            let alive = Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if alive {
+                let _ = Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+}
+
 /// Build the bytes of a tiny Mach-O (fat or thin) header for the given arch.
 fn macho_bytes(arch: FakeArch) -> Vec<u8> {
     const CPU_X86_64: i32 = 0x0100_0007;

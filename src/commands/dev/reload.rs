@@ -67,18 +67,26 @@ pub fn run(args: &DevReloadArgs, ctx: &Ctx) -> CmdResult<()> {
         });
         println!("{}", serde_json::to_string_pretty(&out).expect("json"));
     } else {
-        if !reloaded.is_empty() {
-            ui::frame::emit(
-                ui::frame::Symbol::Good,
-                &format!("reloaded {} ({reload_ms} ms)", reloaded.join(", ")),
-                ctx,
-            );
-        } else {
-            ui::frame::emit(
-                ui::frame::Symbol::Good,
-                &format!("host reloaded ({reload_ms} ms)"),
-                ctx,
-            );
+        // Will this run exit non-zero? An activate() failure, or a strict skip, is
+        // fatal — do NOT print a green `[✓] host reloaded` success line above the
+        // failure frame (findings #5/#8). In the strict-skip short-circuit the daemon
+        // returns `reloaded: []` and no reload actually happened, so a success symbol
+        // would be doubly wrong.
+        let will_fail = !failed.is_empty() || (args.strict && !skipped.is_empty());
+        if !will_fail {
+            if !reloaded.is_empty() {
+                ui::frame::emit(
+                    ui::frame::Symbol::Good,
+                    &format!("reloaded {} ({reload_ms} ms)", reloaded.join(", ")),
+                    ctx,
+                );
+            } else {
+                ui::frame::emit(
+                    ui::frame::Symbol::Good,
+                    &format!("host reloaded ({reload_ms} ms)"),
+                    ctx,
+                );
+            }
         }
         // Skips and failures go to stderr so a `--json`-less pipe of stdout stays clean.
         for s in &skipped {

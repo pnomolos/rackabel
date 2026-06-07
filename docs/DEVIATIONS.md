@@ -834,12 +834,18 @@ DESIGN §8 says the watch chain "calls deploy; do NOT reimplement the copy set,"
 `commands::deploy::run` (and `esbuild::build_extension`) always emit their own success
 output, which would clutter the single `reloaded …` line the loop owns. Since
 `commands::deploy`'s copy set (`CopySet`) is private to that 0.2 file, the chain reuses
-`deploy::run` verbatim against a project-rooted clone of `Ctx` with `json = true`, which
-routes both services through their quiet/machine path. INTEGRATOR NOTE: a dedicated `quiet`
-flag on `Ctx` (or a `pub(crate) fn deploy_quiet` seam in `commands::deploy`) would be
-cleaner than overloading `json`; recorded here as the follow-up. The chain also skips the
-esbuild exec when the bundle is already fresh (same build-if-stale notion `deploy` uses),
-so a save outside the build inputs is a no-op rather than a redundant rebuild.
+`deploy::run` verbatim against a project-rooted clone of `Ctx`. UPDATE (fixer round 1):
+the previous `json = true` overload was WRONG — both services' `report_success` branch on
+`ctx.json` and, when true, `println!` a pretty-JSON envelope to stdout, so a bare
+`rackabel dev` (no `--json`) printed ~20 lines of machine JSON per save above the intended
+`rebuilt … → reloaded` line (the §6.2 clean-transcript promise was broken). The follow-up
+this note anticipated is now done: a dedicated `Ctx.quiet` flag (never set from a CLI flag)
+that both `report_success` sites honor by emitting NOTHING — neither the human frame nor
+the JSON envelope. `echo_on()` also returns false under `quiet`. The watch chain's
+`quiet_project_ctx` and the daemon's pre-launch `deploy_one` now set `quiet` (not `json`).
+The chain also skips the esbuild exec when the bundle is already fresh (same build-if-stale
+notion `deploy` uses), so a save outside the build inputs is a no-op rather than a redundant
+rebuild.
 
 ### D-67. The bare-loop `--only`-routing transcript moved from trycmd to a hermetic integration test (SPEC D §6, DESIGN §6.2)
 
@@ -929,3 +935,98 @@ misses; used for both the extension-root and workspace-lib matches in `ChangeSet
 Regression test:
 `watch::tests::classify_matches_through_a_symlinked_path_prefix` (registers via a symlink
 alias, feeds classify the canonical path).
+
+### D-72. Registry-miss in `dev enable`/`disable`/`unregister`/`reload <name>` is a usage error (`RK0102`), not `RK0309` (DESIGN §3.2, §7)
+
+A typo'd name (`dev disable nope`) used to surface `RK0309 NoDaemon` (exit 3), whose
+`explain` text tells the user to "start the dev host" — wrong class AND wrong remedy, since
+these registry verbs deliberately work WITHOUT a daemon. Added a dedicated
+`ErrorCode::NoSuchExtension` (`RK0102`, usage class / exit 2) with a remedy that points at
+`dev list` / `dev register`; `registry::not_found` now uses it. New `explain` prose +
+`short_title`; the `explain RK9999` valid-codes list gains `RK0102`. trycmd
+`dev_registry.trycmd` now expects exit 2 / `RK0102`. (Fixer round 1, finding #7.)
+
+### D-73. Single-path `dev register` of an already-registered path is idempotent (DESIGN §3.2)
+
+`dev register .` twice produced TWO registry entries for one path (the second under a
+parent-prefixed derived name), so `dev status` showed the project loaded twice.
+`add_recursive` already de-duped by canonical path; the single-path branch did not. Added
+`Registry::find_by_path` (the same canonical-path comparison the other verbs use); the
+`register` verb no-ops with `[✓] <name> is already registered` when the path is already
+present, before computing a name. Tests: `registry::tests::find_by_path_*`,
+`dev_registry.trycmd` idempotent-register block. (Fixer round 1, finding #6.)
+
+### D-74. `dev reload --strict`/activate-failure suppresses the green success line on a non-zero exit (DESIGN §6.1, §7)
+
+`dev reload --strict` printed `[✓] host reloaded (0 ms)` immediately ABOVE the `RK4006`
+failure frame (and no reload had actually happened — the daemon short-circuits returning
+`reloaded: []`). A stable `[✓]` success symbol on a failing (exit 1) command is misleading.
+`reload.rs` now computes the will-fail condition (any activate failure, or a strict skip)
+BEFORE printing, and suppresses the success line when the command will exit non-zero. The
+`Skipped:`/`Failed:` stderr lines + the framed error remain. (Fixer round 1, findings #5/#8.)
+
+### D-75. The transient working set resets when its owning watch session disconnects (DESIGN §3.3)
+
+DESIGN §3.3 calls the working set transient — "for this session." But a scoped
+`dev --only X` watch session set `SetWorkingSet` and never cleared it, so a later plain
+`dev reload` from another terminal kept operating on the dead session's scope until daemon
+restart. The daemon now tags the working set with the connection id that set it
+(`ResponseSink::conn_id`, a monotonic per-connection id) and, when that connection closes
+(`handle_conn` → `connection_closed`), resets the scope to the full enabled set and reloads.
+A plain `dev reload` (a separate short-lived connection) is unaffected; only the OWNING
+session's disconnect clears it. (Fixer round 1, finding #3.)
+
+### D-76. Control-socket request lines are length-capped; mid-stream `StopStream` cancels a follow promptly (SPEC D §2)
+
+Two control-channel robustness fixes share the rewritten `handle_conn`:
+- (#12) `handle_conn` (and the foundation `ipc::handle_connection`) read each request line
+  through a `take(MAX_REQUEST_LINE+1)` cap (64 KiB) instead of an unbounded
+  `reader.lines()`, so a never-newline-terminated stream can no longer buffer unboundedly
+  and OOM the daemon — an oversize line is rejected with `RK0308` and the connection closed.
+- (#13) A dedicated per-connection READER thread owns the input half. A `Logs{follow}` /
+  `Subscribe` stream blocks delivering log lines; the cancelling `StopStream` arrives as the
+  NEXT request line, which the blocked dispatch loop could never read — so Ctrl-C hung the
+  client and leaked a daemon thread. The reader thread intercepts `StopStream` and flips the
+  in-flight stream's `stop` flag directly; `stream_logs` now also sends a closing `LogEnd` on
+  a stop so the client's stream iterator terminates instead of hanging.
+
+### D-77. Daemon process-safety: signal cleanup, identity-bound liveness, start serialization, orphan reaping (DESIGN §3.1, SPEC D §1)
+
+Four daemon hazards fixed (fixer round 1, findings #9/#10/#11):
+- (#9) `run_daemon` installs SIGTERM/SIGINT/SIGHUP handlers (a static `AtomicBool` the
+  accept loop polls) so a catchable kill runs the same `stop_host()` + unlink cleanup
+  instead of dying by default action and orphaning the host. (A `kill -9` is uncatchable by
+  design; its orphan is reaped on the next start — see below.)
+- (#9/#11) The pidfile records the host child's process-group id (`host_pgid`, written after
+  every launch/reload/respawn). `reclaim_stale` killpg's that group when the recorded daemon
+  pid is dead but the host group leader is still alive — so a `-9`'d daemon's orphaned host
+  is reaped on the next `dev start`.
+- (#10) Liveness is now IDENTITY-bound, not bare `kill(pid,0)`: `is_running` requires a
+  socket `Ping` whose `Pong.pid` matches the pidfile pid (and a matching protocol version),
+  defeating PID reuse where a recycled pid made `dev stop` killpg an innocent group.
+  `dev stop`'s escalation killpg is gated on a fresh identity check.
+- (#11) `dev start` holds an exclusive `O_CREAT|O_EXCL` start-lock (per-Live hash) across
+  the is-running check + re-exec + wait-until-up, so concurrent starts observe the first
+  daemon and reuse it instead of each spawning a daemon+host. The lock degrades to proceeding
+  on timeout (never fails a legitimate start) and reclaims a stale lockfile (dead writer pid).
+  The pidfile gains a `host_pgid: Option<i32>` field (`#[serde(default)]` for back-compat).
+
+### D-78. Watch ignores the generated `manifest.json` as a build OUTPUT (DESIGN §3.3, finding #2)
+
+The build step writes `manifest.json` at the project root from `rackabel.toml`; it matches
+the `**/*.json` source glob and lives OUTSIDE `dist/`, so the watcher counted each chain
+run's own manifest write as a new input — a self-write feedback loop that fired the whole
+build→deploy→reload TWICE for one save (one save → two whole-host reloads). `is_source_input`
+now excludes a file named `manifest.json` (it is generated, not a source — `rackabel.toml` is
+the source of truth). A genuinely-edited source JSON under `src/` still triggers. Regression:
+`watch::tests::classify_ignores_generated_manifest_write`.
+
+### D-79. Daemon-spawning integration tests tear down via an RAII `DaemonGuard` (INTEGRATOR, finding #14)
+
+Teardown was a trailing `force_stop()` as the LAST statement of each test body, so any
+assertion panic before it leaked the sandboxed `__daemon` (a setsid session leader) and its
+`rk-fakehost` child indefinitely. Replaced with `common::DaemonGuard` — bound by value at
+test start (`let _guard = DaemonGuard::new(home, work, live)`), its `Drop` runs `dev stop`
+(killpg's the group) + a liveness-gated `kill -9` of the pidfile pid. Drop runs on unwind,
+so a panic still reaps the daemon. The liveness gate also removes the
+`kill: <pid>: No such process` transcript noise (minor #6).

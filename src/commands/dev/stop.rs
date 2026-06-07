@@ -61,8 +61,10 @@ pub fn run(ctx: &Ctx) -> CmdResult<()> {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        if matches!(kill(Pid::from_raw(pid), None), Ok(())) {
-            // Graceful shutdown didn't land — escalate (killpg the daemon's group).
+        // Escalate ONLY if the pid is still alive AND still verifiably OUR daemon
+        // (identity-bound, finding #10): never killpg a process whose pid the OS may
+        // have recycled to an innocent stranger between our check and the signal.
+        if matches!(kill(Pid::from_raw(pid), None), Ok(())) && daemon::is_running(ctx, app) {
             let _ = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGTERM);
             std::thread::sleep(Duration::from_millis(300));
             let _ = nix::sys::signal::killpg(Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL);
