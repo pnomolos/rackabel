@@ -58,17 +58,26 @@ fn dev_verb_wins_over_name() {
 }
 
 /// `--only <token>` ALWAYS routes through the name matcher (the bare loop), never the
-/// verb table — so `dev --only test` is the bare loop (exit 3 with no daemon), proving
-/// the §3.3 scoping rule.
+/// verb table — so `dev --only test` is the bare loop, NOT the `test` subcommand (whose
+/// build/runtime failure would be exit 1 / RK1306), proving the §3.3 scoping rule. The
+/// bare loop runs the preflight gate first; pinned hermetically to Live-not-running +
+/// `--no-input`, that is a deterministic environment exit 3 (RK0303) — and crucially NOT
+/// the verb's exit 1, which is what distinguishes routing-to-the-loop from
+/// routing-to-the-verb. A `FakeLive` `.app` satisfies host-path resolution so the test
+/// does not depend on the runner's real Live install.
 #[test]
 fn only_routes_through_name_matcher_not_verbs() {
     let home = TempDir::new().unwrap();
+    let live = FakeLive::new("12.4.5b3", FakeArch::AppleSilicon, FakeLayout::Helpers);
     rackabel_cmd(home.path(), home.path())
+        .env("ABLETON_APP", live.app_path())
+        .env("RACKABEL_DOCTOR_LIVE_RUNNING", "0")
         .args(["dev", "--only", "test", "--no-input"])
         .assert()
         .failure()
-        .code(3)
-        .stderr(predicate::str::contains("RK0307"));
+        // The bare loop's preflight (Live-not-running + --no-input) → environment exit 3,
+        // never the `test` verb's exit 1. That code IS the routing proof.
+        .code(3);
 }
 
 /// `dev reload` with no daemon is exit 3 (RK0309) — the scriptable CI trigger fails

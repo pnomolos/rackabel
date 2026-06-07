@@ -23,6 +23,9 @@ mod dev_registry;
 // The no-Live `dev test` (§3.8) tests (DEV-TEST): build + stub-runner harness.
 #[cfg(unix)]
 mod dev_test;
+// The watch-loop surface tests (WATCH-LOOP): non-TTY legend, liveness, scope hint.
+#[cfg(unix)]
+mod dev_watch;
 mod doctor;
 mod new;
 mod pack;

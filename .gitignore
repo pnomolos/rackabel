@@ -1,2 +1,7 @@
 /target
 .claude/
+# trycmd transcript state roots (inline RACKABEL_HOME=rk-home* in tests/cli/*.trycmd)
+rk-home
+rk-home-*
+**/rk-home
+**/rk-home-*

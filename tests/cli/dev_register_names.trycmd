@@ -1,11 +1,13 @@
 Name disambiguation + the reserved-verb collision rule (DESIGN §3.2). The entry name
 must be unique and must never equal a `dev` verb (a verb always wins the bare-`dev`
-parse). RACKABEL_HOME is sandboxed per case.
+parse). RACKABEL_HOME is pinned inline to a per-transcript dir (`rk-home-names`, inside
+this case's `.in` run cwd) so this transcript's registry is isolated from every other
+`.trycmd` file regardless of case order; the harness wipes it before each run.
 
 A free `--name` is taken verbatim:
 
 ```
-$ rackabel dev register --name shared dupe-a
+$ RACKABEL_HOME=rk-home-names rackabel dev register --name shared dupe-a
 [✓] registered shared
 
 ```
@@ -14,7 +16,7 @@ Re-using that explicit `--name` is unsatisfiable as written — a usage error (e
 RK0312) that names a free alternative rather than silently renaming the user's choice:
 
 ```
-$ rackabel dev register --name shared dupe-b
+$ RACKABEL_HOME=rk-home-names rackabel dev register --name shared dupe-b
 ? 2
 error: the name `shared` is already taken [RK0312]
   help: choose a free --name (e.g. `[..]shared`), or omit --name to auto-disambiguate from the directory name
@@ -27,7 +29,7 @@ can only be targeted via `--only`/`--`, never `rackabel dev <name>` (which runs 
 subcommand):
 
 ```
-$ rackabel dev register --name list verbdir
+$ RACKABEL_HOME=rk-home-names rackabel dev register --name list verbdir
 [!] `list` is a `dev` verb — registering it anyway, but only `rackabel dev --only list` / `rackabel dev -- list` can target it (`rackabel dev list` runs the subcommand)
 [✓] registered list
 

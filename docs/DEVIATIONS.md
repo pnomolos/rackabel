@@ -696,7 +696,6 @@ FakeHost's crash mode now prints the connected marker + liveness first by defaul
 case), so the crash-respawn/crash-loop tests exercise the real supervisor path. The
 existing "crash mode exits non-zero" fixture assertion is unaffected.
 
-<<<<<<< HEAD
 ### D-56. `dev reload --strict` skip is exit 1, not RK4006's validation class 4 (DESIGN §7 / SPEC D §3)
 
 SPEC D §3 lists `RK4006 SkippedIncompatible` as a *validation* code (exit class 4), but
@@ -805,3 +804,73 @@ surface is unchanged. The `ExtensionHost.txt` tail + parser (`tail_exthost`) and
 emitted `.map` — no new crate, per SPEC D §5) are now implemented; activate-failure stack
 frames pointing at `dist/extension.js:L:C` are mapped back to `src` `file:line` and surfaced
 as a framed `ActivateFailed` line.
+
+### D-64. `build_deploy_reload` takes `&mut Client` (SPEC D §4 froze `&ipc::Client`)
+
+SPEC D §4 lists `build_deploy_reload(changed, client: &ipc::Client, ctx)`, but the
+foundation's real `ipc::Client::call`/`stream` take `&mut self` (they write a request then
+read the response on the same stream), so a shared `&Client` cannot drive a round-trip.
+The watch-loop chain therefore takes `&mut Client` — the same shape `dev status`'s
+`apply_inspect` and every other client call site already use. Pure signature accommodation
+of the frozen `Client` API; the build→deploy→reload ordering contract is unchanged.
+
+### D-65. `[dev].debounce_ms` is read by parsing raw TOML, not via `ManifestRaw` (SPEC D §4.3, DESIGN §3.3)
+
+DESIGN §3.3 specifies a `[dev].debounce_ms` override, but the foundation's `ManifestRaw`
+(`src/manifest/mod.rs`, `#[serde(deny_unknown_fields)]`) has no `[dev]` table and is
+foundation-owned (not a watch-loop file). Rather than edit the shared manifest model, the
+watch command reads the optional value by parsing `rackabel.toml` as a generic `toml::Value`
+(`watch_cmd::read_debounce_from`), defaulting to 200 ms. INTEGRATOR NOTE: a first-class
+`[dev]` table on `ManifestRaw` (with `debounce_ms`, future `[dev]` knobs) is the clean
+home for this; the parse-the-raw-TOML reader is a deliberately small, ownership-respecting
+stand-in until that lands.
+
+### D-66. Watch chain quiets reused build/deploy via a `json`-set ctx clone (DESIGN §8)
+
+DESIGN §8 says the watch chain "calls deploy; do NOT reimplement the copy set," but
+`commands::deploy::run` (and `esbuild::build_extension`) always emit their own success
+output, which would clutter the single `reloaded …` line the loop owns. Since
+`commands::deploy`'s copy set (`CopySet`) is private to that 0.2 file, the chain reuses
+`deploy::run` verbatim against a project-rooted clone of `Ctx` with `json = true`, which
+routes both services through their quiet/machine path. INTEGRATOR NOTE: a dedicated `quiet`
+flag on `Ctx` (or a `pub(crate) fn deploy_quiet` seam in `commands::deploy`) would be
+cleaner than overloading `json`; recorded here as the follow-up. The chain also skips the
+esbuild exec when the bundle is already fresh (same build-if-stale notion `deploy` uses),
+so a save outside the build inputs is a no-op rather than a redundant rebuild.
+
+### D-67. The bare-loop `--only`-routing transcript moved from trycmd to a hermetic integration test (SPEC D §6, DESIGN §6.2)
+
+The foundation `tests/cli/dev_surface.trycmd` asserted the *stubbed* bare-loop output for
+`rackabel dev --only test` (RK0307 "not implemented yet"). With the real loop implemented,
+that case is environment-dependent (it gates on Live + the daemon) and so cannot be a
+Live-agnostic transcript. The trycmd case was removed and the property it proved — `--only`
+routes through the registry name matcher and into the bare loop, NEVER the `test` verb (so
+the bare loop's environment exit 3, not the verb's exit 1) — is now covered hermetically in
+`tests/integration/dev.rs::only_routes_through_name_matcher_not_verbs` (pinned with a
+`FakeLive` + `RACKABEL_DOCTOR_LIVE_RUNNING=0`) and in the WATCH-LOOP suite
+`tests/integration/dev_watch.rs`. No surface guarantee was dropped; it moved to a
+deterministic harness.
+
+---
+
+## 0.3 integration
+
+### D-68. trycmd hermeticity: per-transcript `RACKABEL_HOME`, no suite-level state root (INTEGRATOR)
+
+Merging the four 0.3 agent branches put three *stateful* dev transcripts into the one
+trycmd binary: `dev_registry.trycmd` (registry CRUD), `dev_register_names.trycmd` (name /
+verb collisions), and the `dev test` case in `dev_surface.trycmd` (which asserts an empty
+registry → `RK0001`). The foundation harness set a single suite-level
+`RACKABEL_HOME=<scratch>` for all cases. Two problems surfaced only once the verbs were
+real: (a) all three transcripts then shared ONE registry.toml and, because trycmd does not
+guarantee case order, raced — `dev test` would observe entries another transcript had just
+registered; (b) trycmd's env merge makes the SUITE env win over a per-command inline env
+(`Env::update` does `step.add.extend(suite.add)`), so an inline `RACKABEL_HOME=…` could not
+override the suite value. The integrator therefore (1) dropped the suite-level
+`RACKABEL_HOME` (keeping only `HOME=<pid-keyed scratch>` as the real-`~/.rackabel` safety
+net), so each command's inline `RACKABEL_HOME` now takes effect; (2) pinned a DISTINCT
+inline `RACKABEL_HOME=rk-home-<file>` on every command of the three stateful transcripts so
+they are isolated from each other regardless of case order; (3) wipes those (gitignored)
+relative state dirs at harness start so a run never inherits residue. No transcript
+*content* contract changed; only the state-root plumbing. The `RACKABEL_HOME=rk-home`
+validate transcripts now also genuinely isolate (previously the suite value silently won).

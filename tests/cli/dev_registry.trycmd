@@ -1,12 +1,14 @@
 The registry CRUD verbs operate on `~/.rackabel/registry.toml` and never touch Live,
 the host, or the socket — so they are deterministic on any machine (DESIGN §3.2, the
-SuperCollider "operable with a dead daemon" lesson). RACKABEL_HOME is pinned to a
-sandbox per case; project paths are absolute temp dirs, matched with `[..]`.
+SuperCollider "operable with a dead daemon" lesson). RACKABEL_HOME is pinned inline to a
+per-transcript dir (`rk-home-reg`, inside this case's `.in` run cwd) so its registry is
+isolated from every other `.trycmd` file regardless of case order; the harness wipes it
+before each run. Project paths are matched with `[..]`.
 
 Register the bundled fixture project (its dir basename becomes the entry name):
 
 ```
-$ rackabel dev register my-ext
+$ RACKABEL_HOME=rk-home-reg rackabel dev register my-ext
 [✓] registered my-ext
 
 ```
@@ -14,7 +16,7 @@ $ rackabel dev register my-ext
 List shows one enabled row (STATUS / NAME / PATH):
 
 ```
-$ rackabel dev list
+$ RACKABEL_HOME=rk-home-reg rackabel dev list
 [✓] my-ext  enabled   [..]/my-ext
 
 ```
@@ -22,7 +24,7 @@ $ rackabel dev list
 `--json` emits the stable machine shape (sorted keys):
 
 ```
-$ rackabel dev list --json
+$ RACKABEL_HOME=rk-home-reg rackabel dev list --json
 {
   "extensions": [
     {
@@ -39,14 +41,14 @@ $ rackabel dev list --json
 Disable flips the one `enabled` flag; the row shows `disabled` and a `[!]`:
 
 ```
-$ rackabel dev disable my-ext
+$ RACKABEL_HOME=rk-home-reg rackabel dev disable my-ext
 [✓] disabled my-ext
     help: run `rackabel dev reload` to drop it from a running host
 
 ```
 
 ```
-$ rackabel dev list
+$ RACKABEL_HOME=rk-home-reg rackabel dev list
 [!] my-ext  disabled  [..]/my-ext
 
 ```
@@ -54,7 +56,7 @@ $ rackabel dev list
 Enable flips it back:
 
 ```
-$ rackabel dev enable my-ext
+$ RACKABEL_HOME=rk-home-reg rackabel dev enable my-ext
 [✓] enabled my-ext
     help: run `rackabel dev reload` to load it into a running host
 
@@ -63,13 +65,13 @@ $ rackabel dev enable my-ext
 Unregister removes it; the registry is then empty:
 
 ```
-$ rackabel dev unregister my-ext
+$ RACKABEL_HOME=rk-home-reg rackabel dev unregister my-ext
 [✓] unregistered my-ext
 
 ```
 
 ```
-$ rackabel dev list
+$ RACKABEL_HOME=rk-home-reg rackabel dev list
     help: no extensions registered — `rackabel dev register [PATH]` to add one
 
 ```
@@ -77,7 +79,7 @@ $ rackabel dev list
 Unregistering something that was never there names the bad target (exit 3, RK0309):
 
 ```
-$ rackabel dev unregister nope
+$ RACKABEL_HOME=rk-home-reg rackabel dev unregister nope
 ? 3
 error: no registry entry named or at `nope` [RK0309]
   --> nope

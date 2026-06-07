@@ -8,7 +8,7 @@ name-vs-verb routing asserted here are the frozen contract.
 cannot label N members (§3.2).
 
 ```
-$ rackabel dev register --name foo --recursive
+$ RACKABEL_HOME=rk-home-surface rackabel dev register --name foo --recursive
 ? 2
 error: the argument '--name <NAME>' cannot be used with '--recursive'
 
@@ -22,7 +22,7 @@ A `dev` verb that needs a running daemon, with none up, is an ENVIRONMENT error
 (exit 3, RK0309) — never a hang, never a silent default (§7 `--no-input`).
 
 ```
-$ rackabel dev reload --no-input
+$ RACKABEL_HOME=rk-home-surface rackabel dev reload --no-input
 ? 3
 error: no dev host is running [RK0309]
   --> [..]/daemon
@@ -31,27 +31,20 @@ error: no dev host is running [RK0309]
 
 ```
 
-A bare token that is NOT a verb routes to the bare loop (the registry name matcher),
 not the verb table — `rackabel dev test` is the subcommand, while `rackabel dev --only
-test` targets the extension named `test` (the bare loop, exit 3). With nothing
-registered and no project in the cwd, `dev test` has nothing to test → `RK0001` (it
-routes to the test runner, NOT the bare loop's `RK0307`).
+test` targets the extension named `test` (the bare loop). With nothing registered and no
+project in the cwd, `dev test` has nothing to test → `RK0001` (it routes to the test
+runner, NOT the bare loop's `RK0307`). The bare-loop `--only` routing + scope behavior is
+environment-dependent (it gates on Live / the daemon), so it is covered hermetically in
+the WATCH-LOOP integration tests (`tests/integration/dev_watch.rs`) rather than this
+Live-agnostic transcript.
 
 ```
-$ rackabel dev test --no-input
+$ RACKABEL_HOME=rk-home-surface rackabel dev test --no-input
 ? 3
 error: no manifest found [RK0001]
   --> looked for rackabel.toml in [..] and its parents
   help: run `rackabel new` to scaffold one, or cd into a project directory
 (run `rackabel explain RK0001` for details)
-
-```
-
-```
-$ rackabel dev --only test --no-input
-? 3
-error: the bare `rackabel dev` loop is not implemented yet [RK0307]
-  help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
-(run `rackabel explain RK0307` for details)
 
 ```
