@@ -440,12 +440,106 @@ fn hook_plugin_records_inert_metadata_and_installs_disabled() {
     // Installed disabled (consent gate).
     assert!(lock.contains("enabled = false"));
 
+    // A DISABLED hook plugin's hooks do NOT run: the marker must say so (not "active").
     rackabel_cmd(home.path(), work.path())
         .args(["plugin", "list"])
         .assert()
         .success()
         .stdout(predicate::str::contains("disabled"))
-        .stdout(predicate::str::contains("hook(s) pending (0.5)"));
+        .stdout(predicate::str::contains("hook(s), disabled"))
+        .stdout(predicate::str::contains("hook(s) active").not());
+
+    // After `enable`, the hooks are LIVE — the marker must flip to "active" and the
+    // machine-readable `hooks_active` must be true (NOT `hooks_pending`).
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "enable", "deployer", "--yes"])
+        .assert()
+        .success();
+
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hook(s) active"))
+        .stdout(predicate::str::contains("pending").not());
+
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"hooks_active\": true"))
+        .stdout(predicate::str::contains("\"hooks_pending\": false"));
+}
+
+/// §5.7 consent/tamper guarantee for the multi-script HOOK shape: the pin covers the hook
+/// SCRIPTS the `[hooks]` table runs, not just the launcher exe. Changing a hook script after
+/// `enable` (a) auto-DISABLES the plugin on reinstall (new code never runs under old consent),
+/// and (b) is refused at hook-RUN time (RK4007) until re-`enable`. (Regression: the pin
+/// previously covered only the single launcher executable, so swapped hook code ran silently.)
+#[test]
+fn changing_a_hook_script_revokes_consent_and_auto_disables() {
+    let home = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    // A hook plugin sideloaded from a DIRECTORY (so the manifest + hook script come along).
+    let dir = work.path().join("rackabel-hooky-src");
+    std::fs::create_dir_all(&dir).unwrap();
+    write_plugin_script(&dir.join("rackabel-hooky"), "LAUNCHER");
+    let hook_script = dir.join("post-build.sh");
+    std::fs::write(&hook_script, "#!/bin/sh\ncat >/dev/null\nexit 0\n").unwrap();
+    std::fs::set_permissions(&hook_script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(
+        dir.join("rackabel-plugin.toml"),
+        "[hooks]\npost_build = \"post-build.sh\"\n",
+    )
+    .unwrap();
+
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "install", dir.to_str().unwrap(), "--yes"])
+        .assert()
+        .success();
+
+    // Enable: the hook consent gate is now satisfied (hooks are live).
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "enable", "hooky", "--yes"])
+        .assert()
+        .success();
+    assert!(
+        std::fs::read_to_string(lock_path(home.path()))
+            .unwrap()
+            .contains("enabled = true")
+    );
+
+    // TAMPER the hook SCRIPT in the STORE in place (the launcher exe is untouched).
+    let store_hook = home
+        .path()
+        .join(".rackabel/plugins/store/hooky/post-build.sh");
+    std::fs::write(&store_hook, "#!/bin/sh\ncat >/dev/null\nrm -rf ~\nexit 0\n").unwrap();
+
+    // (a) A reinstall of the CHANGED source must auto-disable (code changed via the hook
+    //     script, even though the launcher is identical) — new code never runs under old
+    //     consent. Update the source's hook script to match the tamper so the pin differs.
+    std::fs::write(
+        &hook_script,
+        "#!/bin/sh\ncat >/dev/null\nrm -rf ~\nexit 0\n",
+    )
+    .unwrap();
+    rackabel_cmd(home.path(), work.path())
+        .args([
+            "plugin",
+            "install",
+            dir.to_str().unwrap(),
+            "--yes",
+            "--force",
+        ])
+        .assert()
+        .success();
+    // The plugin is back to DISABLED (consent must be re-given for the new hook code).
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"name\": \"hooky\""))
+        .stdout(predicate::str::contains("\"hooks_active\": false"));
 }
 
 // --- upgrade-time collision (§5.6) ---------------------------------------------

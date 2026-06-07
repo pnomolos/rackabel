@@ -1321,9 +1321,13 @@ The DESIGN `plugin migrate` synopsis is honored as a SURFACE contract recorded h
 plugin's declared `hook_api` vs the supported `HOOK_API`; `== 1` => "nothing to migrate"
 (success); `> HOOK_API` => a clear UNSUPPORTED frame (`RK0104 MigrateUnsupported`, usage/exit 2)
 rather than a faked codemod. At hook-RUN time the same higher-`hook_api` plugin is refused with
-`RK0405 HookApiUnsupported` (environment/exit 3 — "your rackabel is too old"). The codemod
-engine is built one migration at a time when the FIRST `hook_api` bump ships (the ESLint-v9
-lesson). We deliberately do not fake a codemod.
+`RK0405 HookApiUnsupported` (environment/exit 3 — "your rackabel is too old"): this run-time gate
+IS wired — the discovery resolver carries each plugin's declared `hook_api` onto its
+`ResolvedHook`, and `hooks::engine::run_hook` refuses (before spawn) any hook whose
+`declared_hook_api > HOOK_API`, applying the per-phase policy (a `pre_deploy` gate aborts the
+deploy with RK0405 verbatim; informational/enumerate hooks are logged + skipped). Only the
+`migrate` CODEMOD machinery is deferred. The codemod engine is built one migration at a time when
+the FIRST `hook_api` bump ships (the ESLint-v9 lesson). We deliberately do not fake a codemod.
 
 ### D-101. Hook engine `run_hook` signature takes a `ResolvedHook` (source+command+timeout), not separate `(kind, source)` args (DESIGN §5.3, milestone 0.5 foundation)
 
@@ -1494,3 +1498,24 @@ EXPLICIT about it — a reinstall whose code changed prints "its code changed, s
 — run `rackabel plugin enable <name>` to re-consent" (new code never runs on-save under consent
 given for the old code). `store.rs` is the one PLUGIN-MGMT-owned file this agent edits (a single
 report-wording change in `report_installed`); flagged for the integrator.
+
+### D-110. The §5.7 hook-plugin pin covers the hook SCRIPTS, not just the launcher exe (DESIGN §5.7)
+
+§5.7 is normative that "changing a hook plugin's pinned code does NOT silently retain
+enablement … new code never runs on-save under consent given for the old code," and the §5.7
+runtime tamper check must catch a modified installed file. A sideloaded/cloned plugin was
+pinned ONLY by the sha256 of the single launcher executable `rackabel-<name>` — but the hook
+scripts the manifest's `[hooks]` table actually runs (`post_build = "bin/post-build"`, the
+canonical §5.3 shape) were NOT part of the pin, so a swapped hook script ran under the old
+consent and was undetected at run time. The pin now also records a `hooks_digest`: a sha256
+over the `rackabel-plugin.toml` text PLUS every hook-command file the `[hooks]` table
+references (in `HookKind::ALL` order, each keyed by its declared path; an absent file is a
+sentinel). `PluginLockEntry.hooks_digest` is `Some` only for a manifest-carrying (hook)
+plugin. Three call sites use it: (1) install's `code_changed` folds the digest into its
+comparison, so a swapped hook script (launcher unchanged) is a code change → auto-DISABLES a
+hook plugin on reinstall (D-91/D-109 rule); (2) `verify_entry` re-computes the digest over the
+store and fails `RK4007` on a mismatch; (3) `hooks::engine::run_hook` calls `verify_managed`
+before spawning a PLUGIN hook, so a tampered hook script is refused (RK4007) rather than run.
+A legacy entry written before this field (`hooks_digest = None`) cannot be hook-verified and
+passes (the launcher pin still applies); reinstalling records the digest. A project-local
+`[hooks]` source is the user's own code (implicit trust, no pin) and is never digest-checked.

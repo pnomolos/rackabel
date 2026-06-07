@@ -61,6 +61,16 @@ pub struct PluginLockEntry {
     /// 0.4. Empty when there is no manifest (or it declares no `[hooks]`).
     #[serde(default)]
     pub hooks: Vec<String>,
+    /// A content digest over the §5.7 HOOK attack surface: the `rackabel-plugin.toml` plus
+    /// every hook-command file the `[hooks]` table references. `Some` only for a
+    /// manifest-carrying (hook) plugin. This is the pin the §5.7 consent/tamper guarantee
+    /// covers for the multi-script hook shape: changing a hook script changes this digest,
+    /// which (a) marks the plugin's code as changed on reinstall — auto-DISABLING it (new
+    /// code never runs under old consent) — and (b) is re-verified at hook-RUN time so a
+    /// swapped script is refused (RK4007) rather than run under the old consent. A legacy
+    /// entry written before this field cannot be verified and passes; reinstalling records it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks_digest: Option<String>,
     /// Whether the plugin (and, in 0.5, its hooks) is enabled. Hooks are disabled by
     /// default (§5.3); a PATH-subcommand-only plugin is usable regardless of this flag,
     /// which is the consent gate for the 0.5 hook surface.
@@ -229,6 +239,7 @@ mod tests {
             executable: PathBuf::from(format!("/home/u/.rackabel/plugins/bin/rackabel-{name}")),
             has_plugin_manifest: false,
             hooks: Vec::new(),
+            hooks_digest: None,
             enabled: false,
         }
     }

@@ -49,10 +49,12 @@ fn declared_hook_api(ctx: &Ctx, name: &str, has_manifest: bool) -> Option<u32> {
     let store_dir = plugin_store_dir(ctx, name);
     match store::load_plugin_manifest(&store_dir) {
         Ok(Some(m)) => Some(m.declared_hook_api()),
-        // No manifest on disk (or unreadable) ⇒ treat as nothing to migrate; a corrupt
-        // manifest surfaced its own parse error from load_plugin_manifest only on a true
-        // parse failure, which we let propagate via the Err arm.
+        // No manifest on disk ⇒ nothing to migrate.
         Ok(None) => None,
+        // A corrupt/unreadable manifest is treated as "nothing to migrate" too (this is a
+        // best-effort lookup feeding the migrate decision — a parse error here is not fatal
+        // and is deliberately swallowed; the authoritative parse error surfaces at install
+        // or at hook-run time, not from this read).
         Err(_) => None,
     }
 }
@@ -190,6 +192,7 @@ mod tests {
             executable: PathBuf::from(format!(".rackabel/plugins/bin/rackabel-{name}")),
             has_plugin_manifest: has_manifest,
             hooks: vec![],
+            hooks_digest: None,
             enabled: false,
         });
         lock.save(ctx).unwrap();

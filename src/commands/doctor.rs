@@ -260,15 +260,17 @@ pub fn diagnose(project: Option<&Project>, ctx: &Ctx) -> Diagnosis {
 /// lock order — exactly the discovery resolver's order. Outside a project the stdin payload's
 /// `project_dir`/`manifest_toml` are absent (the hook must tolerate that).
 fn check_plugin_doctor_hooks(diag: &mut Diagnosis, project: Option<&Project>, ctx: &Ctx) {
-    use crate::hooks::manifest::HooksTable;
     use crate::hooks::outcome::{DoctorResolution, DoctorSymbol};
 
-    // The discovery resolver takes the project root + its parsed [hooks] table (project-local
-    // hooks) plus the lock's enabled plugins. A device project's [hooks] table is honored too.
-    let proj_source: Option<(&Path, &HooksTable)> =
-        project.and_then(|p| p.hooks_table().map(|t| (p.root.as_path(), t)));
+    // The §5.3 payload discriminator is project-vs-no-project: inside ANY project the hook
+    // gets `project_dir`/`manifest_toml`, so we pass the project ROOT whenever a project
+    // exists — independent of whether it declares a `[hooks]` table. The project-local
+    // `[hooks]` table is passed separately and used ONLY to add the project's own hook as a
+    // discovery source (a device project's `[hooks]` table is honored too).
+    let proj_root = project.map(|p| p.root.as_path());
+    let proj_hooks = project.and_then(|p| p.hooks_table());
 
-    let rows = match crate::hooks::run::doctor_check_rows(ctx, proj_source) {
+    let rows = match crate::hooks::run::doctor_check_rows(ctx, proj_root, proj_hooks) {
         Ok(rows) => rows,
         // A discovery/lock read hiccup must not crash `doctor` (a diagnostic) — surface a
         // single note row instead, then carry on with the built-in summary.

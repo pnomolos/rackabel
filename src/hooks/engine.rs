@@ -84,6 +84,25 @@ pub fn run_hook(hook: &ResolvedHook, payload: &HookPayload, ctx: &Ctx) -> CmdRes
         "run_hook: payload kind must match the resolved hook's kind"
     );
 
+    // The hook_api gate (§5.3/D-100): a plugin targeting a hook contract NEWER than this
+    // build speaks is REFUSED rather than misinterpreted under the older v1 contract — the
+    // ESLint-v9 lesson. RK0405 (environment/exit 3: "your rackabel is too old"). The caller
+    // applies its per-phase policy to this Err exactly as it does a spawn failure: a
+    // `pre_deploy` gate aborts the deploy, an informational/enumerate hook is logged + skipped
+    // (a project-local source is always the v1 floor, so this only ever fires for a plugin).
+    if hook.declared_hook_api > super::HOOK_API {
+        return Err(hook_api_unsupported(hook));
+    }
+
+    // §5.7 tamper check: before spawning a PLUGIN hook, re-verify the plugin's pinned
+    // attack surface — both the launcher exe AND the hook scripts the [hooks] table runs.
+    // A swapped `bin/post-build` (the launcher unchanged) is refused (RK4007) rather than
+    // run under the consent given for the old code. A project-local hook is the user's own
+    // code (no pin, implicit trust) and is not checked.
+    if let super::HookSource::Plugin { name, .. } = &hook.source {
+        crate::plugin::store::verify_managed(ctx, name)?;
+    }
+
     let raw = exec(hook, payload, ctx)?;
 
     // Route the child's stderr (and a nonzero/timeout note) to rackabel's stderr as
@@ -168,6 +187,30 @@ fn log_informational(hook: &ResolvedHook, raw: &RawRun, ctx: &Ctx) {
             ctx,
         );
     }
+}
+
+/// Build the framed RK0405 error for a hook whose source declares a `hook_api` GREATER than
+/// this build's [`super::HOOK_API`] (§5.3/D-100). The plugin targets a contract this rackabel
+/// does not speak, so its hooks are refused rather than run under the older contract. The
+/// caller applies its per-phase policy (a `pre_deploy` gate aborts; an informational hook is
+/// logged + skipped). Environment class (exit 3): the remedy is to upgrade rackabel.
+fn hook_api_unsupported(hook: &ResolvedHook) -> RkError {
+    RkError::of(
+        ErrorCode::HookApiUnsupported,
+        format!(
+            "the {} hook targets hook_api {} but this rackabel build supports {}",
+            hook.source.label(),
+            hook.declared_hook_api,
+            super::HOOK_API,
+        ),
+        "upgrade rackabel to a build that supports this plugin's hook_api (or `rackabel \
+         plugin disable` it to proceed without its hooks)",
+    )
+    .at(format!(
+        "{} from {}",
+        hook.command_path().display(),
+        hook.source.label()
+    ))
 }
 
 /// Build the framed error for a command that cannot be spawned (does not exist / not
@@ -521,6 +564,7 @@ mod tests {
                 kind,
                 command: name.to_string(),
                 timeout_ms,
+                declared_hook_api: super::super::super::HOOK_API,
             }
         }
 
@@ -853,9 +897,48 @@ mod tests {
                 kind: HookKind::PostBuild,
                 command: "does-not-exist".to_string(),
                 timeout_ms: 5_000,
+                declared_hook_api: super::super::super::HOOK_API,
             };
             let err = run_hook(&hook, &post_build_payload(), &ctx()).unwrap_err();
             assert_eq!(err.code, ErrorCode::HookFailed);
+        }
+
+        /// §5.3/D-100: a hook whose source targets a hook_api NEWER than this build is
+        /// REFUSED with RK0405 at RUN time — and the script is never even spawned (the gate
+        /// fires before exec). The command here would exit 0 if run, so an RK0405 proves the
+        /// gate, not the script.
+        #[test]
+        fn higher_hook_api_is_refused_with_rk0405_before_spawn() {
+            let tmp = TempDir::new().unwrap();
+            let mut hook = script_hook(
+                tmp.path(),
+                "pb.sh",
+                "#!/bin/sh\ncat >/dev/null\nexit 0\n",
+                HookKind::PostBuild,
+                5_000,
+            );
+            hook.declared_hook_api = super::super::super::HOOK_API + 1;
+            let err = run_hook(&hook, &post_build_payload(), &ctx()).unwrap_err();
+            assert_eq!(err.code, ErrorCode::HookApiUnsupported);
+            // Environment class (exit 3): "your rackabel is too old".
+            assert_eq!(err.code.class(), crate::error::ExitClass::Environment);
+        }
+
+        /// A hook at exactly this build's HOOK_API runs normally (the gate is strictly
+        /// greater-than, not >=).
+        #[test]
+        fn equal_hook_api_runs_normally() {
+            let tmp = TempDir::new().unwrap();
+            let hook = script_hook(
+                tmp.path(),
+                "pb.sh",
+                "#!/bin/sh\ncat >/dev/null\nexit 0\n",
+                HookKind::PostBuild,
+                5_000,
+            );
+            // script_hook defaults declared_hook_api to HOOK_API.
+            let out = run_hook(&hook, &post_build_payload(), &ctx()).unwrap();
+            assert_eq!(out, HookOutcome::Informational { failed: false });
         }
     }
 }

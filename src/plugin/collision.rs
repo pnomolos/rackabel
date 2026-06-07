@@ -148,6 +148,7 @@ mod tests {
             executable: PathBuf::from(format!("/h/.rackabel/plugins/bin/rackabel-{name}")),
             has_plugin_manifest: false,
             hooks: Vec::new(),
+            hooks_digest: None,
             enabled: false,
         }
     }

@@ -55,6 +55,11 @@ struct Resolved {
     has_manifest: bool,
     /// The inert hook names declared (0.5 metadata; never executed in 0.4).
     hooks: Vec<String>,
+    /// A content digest over the §5.7 HOOK attack surface: the `rackabel-plugin.toml` plus
+    /// every hook-command file the `[hooks]` table references (NOT just the launcher exe).
+    /// `Some` only for a manifest-carrying (hook) plugin; folded into the pin so a swapped
+    /// hook script auto-disables the plugin and is caught at hook-run time (§5.7).
+    hooks_digest: Option<String>,
 }
 
 /// `rackabel plugin install <source> [--yes] [--force]`.
@@ -112,6 +117,9 @@ pub fn install(args: &PluginInstallArgs, ctx: &Ctx) -> CmdResult<()> {
     let code_changed = existing.as_ref().is_some_and(|p| {
         p.commit.as_deref() != resolved.commit.as_deref()
             || p.sha256.as_deref() != resolved.sha256.as_deref()
+            // §5.7: a swapped HOOK script (the launcher exe unchanged) is still a code
+            // change — fold the hooks digest into the comparison so it auto-disables.
+            || p.hooks_digest.as_deref() != resolved.hooks_digest.as_deref()
     });
     // Default-enabled policy (§5.4 vs §5.7 reconciled — see DEVIATIONS D-88):
     //   - a PLAIN tier-2 plugin (no rackabel-plugin.toml) is immediately USABLE, so a
@@ -138,6 +146,7 @@ pub fn install(args: &PluginInstallArgs, ctx: &Ctx) -> CmdResult<()> {
         executable: link.clone(),
         has_plugin_manifest: resolved.has_manifest,
         hooks: resolved.hooks.clone(),
+        hooks_digest: resolved.hooks_digest.clone(),
         enabled,
     };
     lock.upsert(entry);
@@ -392,7 +401,7 @@ fn resolve_path(p: &Path, name: &str, store: &Path) -> CmdResult<Resolved> {
     };
     set_executable(&exe_in_store)?;
 
-    let (has_manifest, hooks) = read_manifest(store)?;
+    let (has_manifest, hooks, hooks_digest) = read_manifest(store)?;
     let sha = sha256::hash_file(&exe_in_store)?;
     Ok(Resolved {
         name: name.to_string(),
@@ -402,6 +411,7 @@ fn resolve_path(p: &Path, name: &str, store: &Path) -> CmdResult<Resolved> {
         sha256: Some(sha),
         has_manifest,
         hooks,
+        hooks_digest,
     })
 }
 
@@ -443,7 +453,7 @@ fn resolve_tarball(p: &Path, name: &str, store: &Path) -> CmdResult<Resolved> {
 
     // The manifest may sit next to the executable rather than at the store root.
     let exe_dir = exe_in_store.parent().unwrap_or(store);
-    let (has_manifest, hooks) = read_manifest(exe_dir)?;
+    let (has_manifest, hooks, hooks_digest) = read_manifest(exe_dir)?;
     let sha = sha256::hash_file(&exe_in_store)?;
     Ok(Resolved {
         name: name.to_string(),
@@ -453,6 +463,7 @@ fn resolve_tarball(p: &Path, name: &str, store: &Path) -> CmdResult<Resolved> {
         sha256: Some(sha),
         has_manifest,
         hooks,
+        hooks_digest,
     })
 }
 
@@ -539,6 +550,8 @@ fn try_release_asset(
         sha256: Some(sha),
         has_manifest: false,
         hooks: Vec::new(),
+        // A bare release-asset executable carries no manifest, hence no hook surface to pin.
+        hooks_digest: None,
     }))
 }
 
@@ -566,7 +579,7 @@ fn resolve_clone_and_build(
     if let Some(exe) = find_exe_in_tree(&checkout, name) {
         set_executable(&exe)?;
         let exe_dir = exe.parent().unwrap_or(&checkout);
-        let (has_manifest, hooks) = read_manifest(exe_dir)?;
+        let (has_manifest, hooks, hooks_digest) = read_manifest(exe_dir)?;
         // Record a sha256 of the resolved executable IN ADDITION to the commit. The commit
         // pins provenance (and is what `enforce_pin` compares on reinstall, since SourceKind
         // is Gh), but the §5.7 runtime tamper check (`verify_entry`) byte-verifies the
@@ -582,6 +595,7 @@ fn resolve_clone_and_build(
             sha256: Some(sha),
             has_manifest,
             hooks,
+            hooks_digest,
         });
     }
 
@@ -667,9 +681,43 @@ pub fn verify_entry(entry: &PluginLockEntry) -> CmdResult<()> {
     if let Some(expected) = &entry.sha256 {
         // Verify the symlink TARGET (the store file), following the managed-bin symlink.
         let target = std::fs::canonicalize(&entry.executable).unwrap_or(entry.executable.clone());
-        return sha256::verify_file(&target, expected);
+        sha256::verify_file(&target, expected)?;
+    }
+    // §5.7: also verify the HOOK attack surface (the manifest + every hook script the
+    // `[hooks]` table runs), not just the launcher exe. A swapped `bin/post-build` changes
+    // this digest and is refused (RK4007) here — closing the gap where changed hook code ran
+    // under old consent. A legacy entry written before this pin (`hooks_digest = None`) cannot
+    // be verified and passes; reinstalling it records the digest.
+    if let Some(expected) = &entry.hooks_digest {
+        let store_dir = entry_store_dir(entry);
+        let actual = current_hooks_digest(&store_dir)?;
+        if actual.as_deref() != Some(expected.as_str()) {
+            return Err(RkError::of(
+                ErrorCode::PinMismatch,
+                format!(
+                    "`{}`'s hook scripts do not match their pinned digest",
+                    entry.name
+                ),
+                "a hook script (or the rackabel-plugin.toml) was changed after install; \
+                 re-run `rackabel plugin install` to re-pin (this re-disables it for re-consent), \
+                 or `rackabel plugin disable` it",
+            )
+            .at(store_dir.display().to_string()));
+        }
     }
     Ok(())
+}
+
+/// The store directory for an entry, derived from its managed-bin symlink target's parent
+/// (the resolved exe lives inside the store dir). Falls back to the canonical store path by
+/// name so verification still finds the manifest if the symlink is missing.
+fn entry_store_dir(entry: &PluginLockEntry) -> PathBuf {
+    let target =
+        std::fs::canonicalize(&entry.executable).unwrap_or_else(|_| entry.executable.clone());
+    if let Some(parent) = target.parent() {
+        return parent.to_path_buf();
+    }
+    entry.executable.clone()
 }
 
 /// Verify a managed (lock-recorded) plugin's on-disk bytes against its pin before running
@@ -774,11 +822,106 @@ pub fn is_managed_disabled(ctx: &Ctx, name: &str) -> bool {
 }
 
 /// Read the manifest at `dir` (inert 0.5 metadata): presence + sorted hook names.
-fn read_manifest(dir: &Path) -> CmdResult<(bool, Vec<String>)> {
+fn read_manifest(dir: &Path) -> CmdResult<(bool, Vec<String>, Option<String>)> {
     match PluginManifest::load_from_dir(dir)? {
-        Some(m) => Ok((true, m.hook_names())),
-        None => Ok((false, Vec::new())),
+        Some(m) => {
+            let digest = compute_hooks_digest(dir, &m)?;
+            Ok((true, m.hook_names(), Some(digest)))
+        }
+        None => Ok((false, Vec::new(), None)),
     }
+}
+
+/// Compute the §5.7 HOOK-surface digest for a plugin whose manifest lives in `manifest_dir`:
+/// a sha256 over the `rackabel-plugin.toml` text PLUS every hook-command file the `[hooks]`
+/// table references (in [`crate::hooks::HookKind::ALL`] order, each prefixed by its declared
+/// path so a rename is detected). This is the content the §5.7 consent/tamper guarantee pins
+/// for the documented multi-script hook shape — NOT just the launcher executable. A missing
+/// or unreadable hook file contributes a sentinel marker (its absence is itself part of the
+/// surface, so adding/removing it changes the digest). Deterministic and byte-exact.
+fn compute_hooks_digest(manifest_dir: &Path, manifest: &PluginManifest) -> CmdResult<String> {
+    use crate::hooks::HookKind;
+    use sha2::Digest;
+
+    let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, b"rackabel-hooks-digest-v1\0");
+
+    // 1. The manifest text itself (so a changed command path / timeout / hook_api is caught).
+    let manifest_path = manifest_dir.join(crate::plugin::manifest::PLUGIN_MANIFEST_NAME);
+    let manifest_bytes = std::fs::read(&manifest_path).unwrap_or_default();
+    sha2::Digest::update(&mut hasher, b"manifest\0");
+    sha2::Digest::update(&mut hasher, (manifest_bytes.len() as u64).to_le_bytes());
+    sha2::Digest::update(&mut hasher, &manifest_bytes);
+
+    // 2. Each declared hook command file, in canonical order, keyed by its declared path.
+    for kind in HookKind::ALL {
+        let Some(cmd) = manifest.hooks.command(*kind) else {
+            continue;
+        };
+        sha2::Digest::update(&mut hasher, kind.as_str().as_bytes());
+        sha2::Digest::update(&mut hasher, b"=");
+        sha2::Digest::update(&mut hasher, cmd.as_bytes());
+        sha2::Digest::update(&mut hasher, b"\0");
+
+        // Resolve relative to the manifest dir (the same anchor the engine uses for a plugin
+        // hook). An absolute command is hashed at its absolute path.
+        let p = Path::new(cmd);
+        let resolved = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            manifest_dir.join(p)
+        };
+        match std::fs::read(&resolved) {
+            Ok(bytes) => {
+                sha2::Digest::update(&mut hasher, b"file\0");
+                sha2::Digest::update(&mut hasher, (bytes.len() as u64).to_le_bytes());
+                sha2::Digest::update(&mut hasher, &bytes);
+            }
+            // Absent/unreadable: a sentinel so presence/absence is part of the surface.
+            Err(_) => sha2::Digest::update(&mut hasher, b"absent\0"),
+        }
+    }
+
+    let out = sha2::Digest::finalize(hasher);
+    let mut hex = String::with_capacity(out.len() * 2);
+    for b in out {
+        use std::fmt::Write;
+        let _ = write!(hex, "{b:02x}");
+    }
+    Ok(hex)
+}
+
+/// Re-compute a plugin's §5.7 HOOK-surface digest from its store dir, the same way install
+/// recorded it. Returns `Ok(None)` when there is no manifest (a plain tier-2 plugin has no
+/// hook surface to pin). Used by [`verify_entry`] to catch a tampered hook script at run time.
+pub fn current_hooks_digest(store_dir: &Path) -> CmdResult<Option<String>> {
+    // The manifest may sit next to the executable rather than at the store root (tarball
+    // layout); resolve it the same way discovery does.
+    let dir = manifest_dir_for(store_dir);
+    match PluginManifest::load_from_dir(&dir)? {
+        Some(m) => Ok(Some(compute_hooks_digest(&dir, &m)?)),
+        None => Ok(None),
+    }
+}
+
+/// The directory a plugin's `rackabel-plugin.toml` lives in within its store dir: the store
+/// root if the manifest is there, else the directory holding the `rackabel-<name>` exe (the
+/// tarball-with-top-level-dir layout). Falls back to the store root.
+fn manifest_dir_for(store_dir: &Path) -> PathBuf {
+    if store_dir
+        .join(crate::plugin::manifest::PLUGIN_MANIFEST_NAME)
+        .is_file()
+    {
+        return store_dir.to_path_buf();
+    }
+    // Look for the exe and use its parent (where the manifest sits in the tarball layout).
+    if let Some(name) = store_dir.file_name().and_then(|s| s.to_str())
+        && let Some(exe) = find_exe_in_tree(store_dir, name)
+        && let Some(parent) = exe.parent()
+    {
+        return parent.to_path_buf();
+    }
+    store_dir.to_path_buf()
 }
 
 /// Load the parsed `rackabel-plugin.toml` from an installed plugin's store dir, or
@@ -1148,6 +1291,7 @@ mod tests {
             executable: PathBuf::from("/l"),
             has_plugin_manifest: false,
             hooks: vec![],
+            hooks_digest: None,
             enabled: true,
         };
         let same = Resolved {
@@ -1158,6 +1302,7 @@ mod tests {
             sha256: Some("AA".into()), // case-insensitive match
             has_manifest: false,
             hooks: vec![],
+            hooks_digest: None,
         };
         let ctx = test_ctx();
         assert!(enforce_pin(&ctx, &prev, &same, false).is_ok());
@@ -1193,6 +1338,7 @@ mod tests {
             executable: exe.clone(),
             has_plugin_manifest: false,
             hooks: vec![],
+            hooks_digest: None,
             enabled: true,
         };
         // Untampered: passes.
@@ -1201,6 +1347,74 @@ mod tests {
         std::fs::write(&exe, b"TAMPERED").unwrap();
         let err = verify_entry(&entry).unwrap_err();
         assert_eq!(err.code, ErrorCode::PinMismatch);
+    }
+
+    /// §5.7: verify_entry must catch a swapped HOOK SCRIPT, not just the launcher exe. The
+    /// launcher is untouched; only `bin/post-build` changes — verify_entry must still RK4007.
+    #[test]
+    fn verify_entry_catches_a_tampered_hook_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = tmp.path();
+        // The launcher exe + a hook script + a manifest pointing at it.
+        let exe = store.join("rackabel-hooky");
+        std::fs::write(&exe, b"LAUNCHER").unwrap();
+        let hook = store.join("post-build.sh");
+        std::fs::write(&hook, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(
+            store.join(crate::plugin::manifest::PLUGIN_MANIFEST_NAME),
+            "[hooks]\npost_build = \"post-build.sh\"\n",
+        )
+        .unwrap();
+        let sha = sha256::hash_file(&exe).unwrap();
+        let digest = current_hooks_digest(store).unwrap();
+        assert!(digest.is_some(), "a hook plugin records a hooks digest");
+        let entry = PluginLockEntry {
+            name: "hooky".into(),
+            source: SourceKind::Path,
+            origin: "/x/rackabel-hooky".into(),
+            commit: None,
+            sha256: Some(sha),
+            installed_at: "t".into(),
+            executable: exe.clone(),
+            has_plugin_manifest: true,
+            hooks: vec!["post_build".into()],
+            hooks_digest: digest,
+            enabled: true,
+        };
+        // Untampered: passes (launcher AND hook script match).
+        assert!(verify_entry(&entry).is_ok());
+        // Swap ONLY the hook script — the launcher exe is untouched. §5.7 must catch it.
+        std::fs::write(&hook, b"#!/bin/sh\nrm -rf ~\n").unwrap();
+        let err = verify_entry(&entry).unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::PinMismatch,
+            "a swapped hook script must be a pin mismatch (the §5.7 tamper guarantee)"
+        );
+    }
+
+    /// A legacy entry written before the hooks-digest pin (`hooks_digest = None`) cannot be
+    /// hook-verified and passes (the launcher pin still applies); reinstalling records it.
+    #[test]
+    fn verify_entry_legacy_no_hooks_digest_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("rackabel-old");
+        std::fs::write(&exe, b"OLD").unwrap();
+        let sha = sha256::hash_file(&exe).unwrap();
+        let entry = PluginLockEntry {
+            name: "old".into(),
+            source: SourceKind::Path,
+            origin: "/x/rackabel-old".into(),
+            commit: None,
+            sha256: Some(sha),
+            installed_at: "t".into(),
+            executable: exe,
+            has_plugin_manifest: true,
+            hooks: vec!["post_build".into()],
+            hooks_digest: None, // legacy: no digest recorded
+            enabled: true,
+        };
+        assert!(verify_entry(&entry).is_ok());
     }
 
     fn test_ctx() -> Ctx {

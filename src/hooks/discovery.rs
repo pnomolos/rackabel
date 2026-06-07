@@ -39,6 +39,12 @@ pub struct ResolvedHook {
     pub command: String,
     /// The resolved per-hook wall-clock timeout in milliseconds (§5.3).
     pub timeout_ms: u64,
+    /// The tier-3 hook contract version this hook's source TARGETS (`hook_api`, §5.2/§5.3).
+    /// A plugin declares it in `rackabel-plugin.toml`; a project-local `[hooks]` source has
+    /// no manifest and is always the v1 floor (1). The engine refuses to run a hook whose
+    /// `declared_hook_api` EXCEEDS this build's [`crate::hooks::HOOK_API`] (RK0405) rather
+    /// than misinterpreting it under an older contract (D-100, the ESLint-v9 lesson).
+    pub declared_hook_api: u32,
 }
 
 impl ResolvedHook {
@@ -80,6 +86,9 @@ pub fn resolve(
             kind,
             command: cmd.to_string(),
             timeout_ms: table.timeout_ms(kind),
+            // A project-local [hooks] source carries no manifest/hook_api — it is the user's
+            // own code at the v1 floor (and is never gated by RK0405).
+            declared_hook_api: crate::hooks::HOOK_API,
         });
     }
 
@@ -97,10 +106,10 @@ pub fn resolve(
             continue;
         }
         let store_dir = plugin_store_dir(ctx, &entry.name);
-        // Re-read the manifest for the authoritative command + timeout (the lock holds
-        // only names). A plugin whose manifest no longer parses / no longer declares the
-        // kind is skipped here rather than failing the whole resolution.
-        let Some(table) = load_plugin_hooks(&store_dir)? else {
+        // Re-read the manifest for the authoritative command + timeout + declared hook_api
+        // (the lock holds only names). A plugin whose manifest no longer parses / no longer
+        // declares the kind is skipped here rather than failing the whole resolution.
+        let Some((table, declared_hook_api)) = load_plugin_hooks(&store_dir)? else {
             continue;
         };
         let Some(cmd) = table.command(kind) else {
@@ -114,18 +123,26 @@ pub fn resolve(
             kind,
             command: cmd.to_string(),
             timeout_ms: table.timeout_ms(kind),
+            // The version the plugin TARGETS; the engine refuses it (RK0405) when it exceeds
+            // this build's HOOK_API rather than running it under the older contract (D-100).
+            declared_hook_api,
         });
     }
 
     Ok(out)
 }
 
-/// Load the `[hooks]` table from an installed plugin's `rackabel-plugin.toml` in its store
-/// dir, returning `Ok(None)` when there is no manifest (or it declares no hooks). Uses the
-/// foundation [`store`] resolver to find the manifest within the store dir.
-fn load_plugin_hooks(store_dir: &Path) -> CmdResult<Option<HooksTable>> {
+/// Load the `[hooks]` table AND the declared `hook_api` from an installed plugin's
+/// `rackabel-plugin.toml` in its store dir, returning `Ok(None)` when there is no manifest.
+/// Uses the foundation [`store`] resolver to find the manifest within the store dir. The
+/// `hook_api` (floor 1 when unset) is carried so the engine can refuse a plugin targeting a
+/// contract this build does not speak (RK0405, §5.3/D-100).
+fn load_plugin_hooks(store_dir: &Path) -> CmdResult<Option<(HooksTable, u32)>> {
     match store::load_plugin_manifest(store_dir)? {
-        Some(m) => Ok(Some(m.hooks)),
+        Some(m) => {
+            let api = m.declared_hook_api();
+            Ok(Some((m.hooks, api)))
+        }
         None => Ok(None),
     }
 }
@@ -183,6 +200,7 @@ mod tests {
             executable: PathBuf::from(format!(".rackabel/plugins/bin/rackabel-{name}")),
             has_plugin_manifest: true,
             hooks: hooks.into_iter().map(str::to_string).collect(),
+            hooks_digest: None,
             enabled,
         });
         lock.save(ctx).unwrap();
@@ -267,6 +285,45 @@ mod tests {
     }
 
     #[test]
+    fn declared_hook_api_flows_through_from_the_manifest() {
+        let tmp = tempdir().unwrap();
+        let c = ctx(tmp.path());
+        // A plugin declaring hook_api = 2 (newer than this build's HOOK_API = 1).
+        install_plugin(
+            &c,
+            "future",
+            true,
+            "hook_api = 2\n[hooks]\npost_build = \"bin/pb\"\n",
+            vec!["post_build"],
+        );
+        // A plugin with no hook_api key — the v1 floor.
+        install_plugin(
+            &c,
+            "legacy",
+            true,
+            "[hooks]\npost_build = \"bin/pb\"\n",
+            vec!["post_build"],
+        );
+        let resolved = resolve(&c, HookKind::PostBuild, None).unwrap();
+        let future = resolved
+            .iter()
+            .find(|h| h.source.label() == "plugin future")
+            .unwrap();
+        let legacy = resolved
+            .iter()
+            .find(|h| h.source.label() == "plugin legacy")
+            .unwrap();
+        assert_eq!(
+            future.declared_hook_api, 2,
+            "the higher hook_api is carried"
+        );
+        assert_eq!(
+            legacy.declared_hook_api, 1,
+            "absent hook_api is the v1 floor"
+        );
+    }
+
+    #[test]
     fn command_path_joins_relative_onto_base_dir() {
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("proj");
@@ -277,6 +334,7 @@ mod tests {
             kind: HookKind::PostBuild,
             command: ".rackabel/hooks/pb".to_string(),
             timeout_ms: 30_000,
+            declared_hook_api: crate::hooks::HOOK_API,
         };
         assert_eq!(h.command_path(), root.join(".rackabel/hooks/pb"));
     }

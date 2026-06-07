@@ -66,6 +66,18 @@ pub fn pre_deploy(ctx: &Ctx, project: &Project, payload: &HookPayload) -> CmdRes
         // A pre_deploy hook that cannot even start is a refusal (the gate is broken).
         let outcome = match engine::run_hook(hook, payload, ctx) {
             Ok(o) => o,
+            // A hook_api-unsupported gate (§5.3/D-100, RK0405 exit 3) or a §5.7 tamper
+            // (RK4007 exit 4) is surfaced VERBATIM — both abort the deploy (a gate the user
+            // enabled that cannot run safely is a refusal), keeping their own exit class
+            // rather than being re-framed as a generic deploy-vetoed.
+            Err(e)
+                if matches!(
+                    e.code,
+                    ErrorCode::HookApiUnsupported | ErrorCode::PinMismatch
+                ) =>
+            {
+                return Err(e);
+            }
             Err(e) => return Err(spawn_abort(hook, e)),
         };
         if let HookOutcome::Veto(VetoDecision::Veto { timed_out }) = outcome {
@@ -331,5 +343,66 @@ mod tests {
         let proj = Project::discover(&root).unwrap();
         let err = pre_deploy(&ctx(tmp.path()), &proj, &pd_payload()).unwrap_err();
         assert_eq!(err.code, ErrorCode::PreDeployVetoed);
+    }
+
+    /// §5.3/D-100: an enabled plugin whose `pre_deploy` targets a hook_api NEWER than this
+    /// build ABORTS the deploy at run-time with RK0405 VERBATIM (environment/exit 3), not a
+    /// re-framed RK1310 — and the gate script is never spawned.
+    #[test]
+    #[cfg(unix)]
+    fn pre_deploy_hook_api_too_high_aborts_with_rk0405_verbatim() {
+        use crate::plugin::lock::{LockFile, PluginLockEntry, SourceKind};
+        use crate::plugin::plugin_store_dir;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        // Install + enable a plugin declaring hook_api = 2 with a pre_deploy gate.
+        let store = plugin_store_dir(&c, "future");
+        std::fs::create_dir_all(&store).unwrap();
+        let script = store.join("pd.sh");
+        // Would exit 0 (allow) if it ran — proving the gate fires before spawn.
+        std::fs::write(&script, "#!/bin/sh\ncat >/dev/null\nexit 0\n").unwrap();
+        let mut p = std::fs::metadata(&script).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(&script, p).unwrap();
+        std::fs::write(
+            store.join("rackabel-plugin.toml"),
+            "hook_api = 2\n[hooks]\npre_deploy = \"pd.sh\"\n",
+        )
+        .unwrap();
+        let mut lock = LockFile::load(&c).unwrap();
+        lock.upsert(PluginLockEntry {
+            name: "future".to_string(),
+            source: SourceKind::Path,
+            origin: "/x/rackabel-future".to_string(),
+            commit: None,
+            sha256: None, // legacy/no byte-pin so verify_managed is a no-op here
+            installed_at: "2026-06-07T00:00:00Z".to_string(),
+            executable: store.join("rackabel-future"),
+            has_plugin_manifest: true,
+            hooks: vec!["pre_deploy".to_string()],
+            hooks_digest: None,
+            enabled: true,
+        });
+        lock.save(&c).unwrap();
+
+        // A project with no project-local pre_deploy of its own.
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("rackabel.toml"),
+            "[extension]\nname=\"x\"\nauthor=\"t\"\nversion=\"0.1.0\"\nminimum_api_version=\"1.0.0\"\n",
+        )
+        .unwrap();
+        let proj = Project::discover(&root).unwrap();
+
+        let err = pre_deploy(&c, &proj, &pd_payload()).unwrap_err();
+        assert_eq!(
+            err.code,
+            ErrorCode::HookApiUnsupported,
+            "a hook_api-too-high pre_deploy gate aborts with RK0405 verbatim, not RK1310"
+        );
+        assert_eq!(err.code.class(), crate::error::ExitClass::Environment);
     }
 }

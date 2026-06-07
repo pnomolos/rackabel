@@ -43,23 +43,34 @@ pub struct DoctorCheckRow {
 /// Run every discovered, enabled `doctor_check` hook (project-local first, then enabled
 /// plugins in lock order) and return one [`DoctorCheckRow`] each (§5.3).
 ///
-/// `project` is the discovered project root + parsed `[hooks]` table when `doctor` runs
-/// INSIDE a project, else `None` — and in the no-project case BOTH payload fields are absent
-/// (`doctor` is an environment command that runs outside a project, §5.2/§6.2; a
-/// `doctor_check` hook MUST tolerate that). A spawn failure or any non-line outcome is folded
-/// into a row (never propagated as a command error): `doctor`'s own checklist IS the output.
+/// `project_root` is the discovered project root when `doctor` runs INSIDE a project, else
+/// `None`. It is the SOLE discriminator for the §5.3 payload's `{project_dir?,
+/// manifest_toml?}`: inside a project BOTH are present (regardless of whether the project
+/// declares a `[hooks]` table), outside one BOTH are absent (`doctor` is an environment
+/// command, §5.2/§6.2; a `doctor_check` hook MUST tolerate that). `project_hooks` is the
+/// project's parsed `[hooks]` table when it declares one — used ONLY to add the project-local
+/// hook as a discovery source, never to gate the payload (that was the §5.3 divergence: a
+/// project with no `[hooks]` table still sends `project_dir`/`manifest_toml`). A spawn failure
+/// or any non-line outcome is folded into a row (never propagated as a command error):
+/// `doctor`'s own checklist IS the output.
 pub fn doctor_check_rows(
     ctx: &Ctx,
-    project: Option<(&Path, &HooksTable)>,
+    project_root: Option<&Path>,
+    project_hooks: Option<&HooksTable>,
 ) -> CmdResult<Vec<DoctorCheckRow>> {
-    let hooks = discovery::resolve(ctx, HookKind::DoctorCheck, project)?;
+    // The discovery resolver needs the project-local [hooks] source pair (root + table) only
+    // when the project declares a [hooks] table; the payload, by contrast, needs the root
+    // whenever a project exists at all (the §5.3 project-vs-no-project discriminator).
+    let project_source = project_root.zip(project_hooks);
+    let hooks = discovery::resolve(ctx, HookKind::DoctorCheck, project_source)?;
     if hooks.is_empty() {
         return Ok(Vec::new());
     }
 
-    // Build the stdin payload ONCE: {project_dir?, manifest_toml?} — both absent outside a
-    // project (omitted-not-empty, never "" / null). The same object goes to every hook.
-    let payload = doctor_check_payload(project);
+    // Build the stdin payload ONCE: {project_dir?, manifest_toml?} — both present inside ANY
+    // project (regardless of a [hooks] table), both absent outside one (omitted-not-empty,
+    // never "" / null). The same object goes to every hook.
+    let payload = doctor_check_payload(project_root);
 
     let mut rows = Vec::with_capacity(hooks.len());
     for hook in &hooks {
@@ -80,12 +91,13 @@ pub fn doctor_check_rows(
 }
 
 /// Build the `doctor_check` stdin payload: `{project_dir?, manifest_toml?}`. Both fields are
-/// ABSENT outside a project; inside one, `manifest_toml` is the PARSED `rackabel.toml` as a
-/// JSON object (not a path, §5.3). A manifest that no longer parses degrades to no
-/// `manifest_toml` (the hook still gets `project_dir` and must tolerate a partial payload).
-fn doctor_check_payload(project: Option<(&Path, &HooksTable)>) -> HookPayload {
-    let (project_dir, manifest_toml) = match project {
-        Some((root, _)) => {
+/// ABSENT outside a project; inside one (whether or not it declares a `[hooks]` table), both
+/// are present — `manifest_toml` is the PARSED `rackabel.toml` as a JSON object (not a path,
+/// §5.3). A manifest that no longer parses degrades to no `manifest_toml` (the hook still gets
+/// `project_dir` and must tolerate a partial payload).
+fn doctor_check_payload(project_root: Option<&Path>) -> HookPayload {
+    let (project_dir, manifest_toml) = match project_root {
+        Some(root) => {
             let manifest_path = root.join(crate::manifest::MANIFEST_NAME);
             let manifest_toml = std::fs::read_to_string(&manifest_path)
                 .ok()
@@ -167,7 +179,6 @@ mod tests {
     use super::*;
     use crate::plugin::lock::{LockFile, PluginLockEntry, SourceKind};
     use crate::plugin::plugin_store_dir;
-    use std::path::PathBuf;
     use tempfile::tempdir;
 
     fn ctx(home: &Path) -> Ctx {
@@ -215,6 +226,13 @@ mod tests {
             format!("[hooks]\n{} = \"{hook_rel}\"\n", kind.as_str()),
         )
         .unwrap();
+        // Write a real launcher executable in the store and pin its real sha256 + the §5.7
+        // hooks digest, so the engine's run-time tamper check (verify_managed) passes for an
+        // untampered fixture (it byte-verifies the launcher AND the hook scripts).
+        let exe = store.join(format!("rackabel-{name}"));
+        std::fs::write(&exe, b"#!/bin/sh\nexit 0\n").unwrap();
+        let sha = crate::plugin::sha256::hash_file(&exe).unwrap();
+        let digest = crate::plugin::store::current_hooks_digest(&store).unwrap();
 
         let mut lock = LockFile::load(ctx).unwrap();
         lock.upsert(PluginLockEntry {
@@ -222,11 +240,12 @@ mod tests {
             source: SourceKind::Path,
             origin: format!("/x/rackabel-{name}"),
             commit: None,
-            sha256: Some("ab".to_string()),
+            sha256: Some(sha),
             installed_at: "2026-06-07T00:00:00Z".to_string(),
-            executable: PathBuf::from(format!(".rackabel/plugins/bin/rackabel-{name}")),
+            executable: exe,
             has_plugin_manifest: true,
             hooks: vec![kind.as_str().to_string()],
+            hooks_digest: digest,
             enabled,
         });
         lock.save(ctx).unwrap();
@@ -244,7 +263,7 @@ mod tests {
             HookKind::DoctorCheck,
             r#"echo '{"symbol":"warn","message":"creds missing"}'; exit 1"#,
         );
-        let rows = doctor_check_rows(&c, None).unwrap();
+        let rows = doctor_check_rows(&c, None, None).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source_label, "plugin notarize");
         assert_eq!(rows[0].plugin_name.as_deref(), Some("notarize"));
@@ -268,7 +287,7 @@ mod tests {
             HookKind::DoctorCheck,
             r#"echo '{"symbol":"ok","message":"x"}'"#,
         );
-        assert!(doctor_check_rows(&c, None).unwrap().is_empty());
+        assert!(doctor_check_rows(&c, None, None).unwrap().is_empty());
     }
 
     #[cfg(unix)]
@@ -284,10 +303,48 @@ mod tests {
             HookKind::DoctorCheck,
             r#"in=$(cat); case "$in" in *project_dir*) echo '{"symbol":"fail","message":"leaked"}';; *) echo '{"symbol":"ok","message":"no-project ok"}';; esac"#,
         );
-        let rows = doctor_check_rows(&c, None).unwrap();
+        let rows = doctor_check_rows(&c, None, None).unwrap();
         match &rows[0].resolution {
             DoctorResolution::Line(l) => assert_eq!(l.message, "no-project ok"),
             other => panic!("expected ok line, got {other:?}"),
+        }
+    }
+
+    /// §5.3 regression: an enabled-plugin `doctor_check` run INSIDE a project that declares
+    /// NO `[hooks]` table must STILL receive `project_dir` (+ a `manifest_toml` object) — the
+    /// payload discriminator is project-vs-no-project, never "does the project declare hooks".
+    #[cfg(unix)]
+    #[test]
+    fn doctor_check_inside_project_without_hooks_table_sends_project_fields() {
+        let tmp = tempdir().unwrap();
+        let c = ctx(tmp.path());
+        // A project root WITH a rackabel.toml but NO [hooks] table.
+        let proj = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("rackabel.toml"),
+            "[extension]\nname = \"x\"\nauthor = \"t\"\nversion = \"0.1.0\"\nminimum_api_version = \"1.0.0\"\n",
+        )
+        .unwrap();
+        // The hook reports a FAIL line iff it sees BOTH project_dir and the manifest object
+        // (a manifest_toml carrying the extension name proves it is the parsed object, not a
+        // path); otherwise it passes. Inside a project it MUST see both.
+        install_script_plugin(
+            &c,
+            "p",
+            true,
+            HookKind::DoctorCheck,
+            r#"in=$(cat); if echo "$in" | grep -q project_dir && echo "$in" | grep -q manifest_toml; then echo '{"symbol":"fail","message":"got project ctx"}'; else echo '{"symbol":"ok","message":"no ctx"}'; fi"#,
+        );
+        // No [hooks] table (None) but a real project root (Some).
+        let rows = doctor_check_rows(&c, Some(proj.as_path()), None).unwrap();
+        match &rows[0].resolution {
+            DoctorResolution::Line(l) => assert_eq!(
+                l.message, "got project ctx",
+                "an enabled plugin's doctor_check inside a project MUST get project_dir + \
+                 manifest_toml even with no [hooks] table"
+            ),
+            other => panic!("expected the project-context line, got {other:?}"),
         }
     }
 
