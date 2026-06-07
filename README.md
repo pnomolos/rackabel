@@ -6,12 +6,15 @@ A CLI for building Ableton Live Extensions and Max for Live devices.
 
 ## Status
 
-**0.3 — Managed dev host.** `rackabel dev` runs the headline edit→reload loop: a
-supervised Extension Host daemon, a persistent registry, a file watcher that rebuilds and
-hot-reloads on save, per-extension logs, and a no-Live CI entry point — all on top of the
-0.2 build/deploy/pack/validate parity, the richer `new` scaffolder, and the extended
-`doctor`. The Max for Live `[device]` path is preserved (its `.amxd` assembly is still a
-later milestone). Git-hosted templates and lifecycle hooks land in 0.4–0.5.
+**0.4 — Extensibility.** rackabel is now extensible end to end: third-party
+`rackabel-<foo>` subcommands (Git/cargo-style dispatch, built-ins always win), a pinned
+`plugin install`/`list`/`enable`/`disable`/`search` surface backed by `plugins.lock`, and
+Git-hosted **templates** — `new --template` to scaffold and `new --update` to 3-way-merge
+later. This sits on top of 0.3's managed dev host (`rackabel dev`: supervised Extension Host
+daemon, persistent registry, watch + hot-reload, per-extension logs, no-Live CI) and the 0.2
+build/deploy/pack/validate parity, richer `new`, and extended `doctor`. The Max for Live
+`[device]` path is preserved (its `.amxd` assembly is still a later milestone); lifecycle
+hooks land in 0.5.
 
 ## Commands
 
@@ -25,6 +28,19 @@ later milestone). Git-hosted templates and lifecycle hooks land in 0.4–0.5.
 | `doctor`   | Diagnose the environment (Live, host module, node, User Library, …) |
 | `explain`  | Long-form help for an error code, cargo `--explain` style |
 | `dev`      | The managed dev host: edit→build→deploy→reload loop + lifecycle verbs |
+| `plugin`   | Install/manage third-party `rackabel-<foo>` subcommands (group; see below) |
+| `<foo>`    | Any unknown token runs a `rackabel-<foo>` plugin, if one is installed/on `$PATH` |
+
+`rackabel plugin` is the third-party extension surface:
+
+| `plugin` verb | What it does |
+|---|---|
+| `plugin install <src>` | Install from `OWNER/REPO` (release asset or pinned clone), a local path, or a `.tgz` — sha256/commit pinned into `plugins.lock` |
+| `plugin list`          | Installed plugins with their pin + enabled state (`--json` for the stable shape) |
+| `plugin which <name>`  | Where a name resolves: built-in, managed copy, or `$PATH` (and whether it is shadowed) |
+| `plugin enable` / `disable` | Toggle whether a managed plugin is reachable as a bare `rackabel <name>` |
+| `plugin run <name>`    | Escape hatch: run a plugin explicitly, even if a built-in shadows the name |
+| `plugin search <term>` | Search GitHub for `rackabel-plugin`-topic repos (`--json`) |
 
 `rackabel dev` is a command group. Bare `dev` runs the watch loop; the verbs control the
 host and its registry:
@@ -112,6 +128,62 @@ abort the whole host — `dev reload --strict` turns any such skip into a fatal 
 
 The host runs as a daemon under `RACKABEL_HOME`, one per resolved Live install, so closing
 the terminal leaves it running; `dev logs` / `dev status` from another shell still work.
+
+## Plugins & subcommands
+
+rackabel is extensible: any leading token that is **not** a built-in is dispatched to a
+`rackabel-<foo>` executable (Git/cargo style). Built-ins always win — a plugin can never
+shadow `build`, `dev`, etc. — so `rackabel hello` runs `rackabel-hello` only when `hello`
+isn't reserved.
+
+```sh
+rackabel plugin install owner/repo        # remote: announces what it will fetch/run, asks first
+rackabel plugin install ./rackabel-foo    # sideload a local executable (no network)
+rackabel plugin install ./foo.tgz         # sideload a tarball
+rackabel plugin list                      # what's installed, with its pin + enabled state
+rackabel foo --bar                        # run it: argv after the name is forwarded verbatim
+rackabel plugin disable foo               # stop dispatching the bare name (run still reaches it)
+rackabel plugin run dev                   # escape hatch: run a plugin even if a built-in shadows it
+```
+
+Resolution order for a bare `rackabel <foo>`: a built-in (always wins), then the managed
+copy under `~/.rackabel/plugins/bin`, then `$PATH`. If the same `rackabel-<foo>` is in both
+the managed dir and `$PATH`, the managed one is used and a **one-time** note is printed to
+stderr (see `plugin which <foo>`).
+
+Security (§5.7): a **remote** install prints exactly what it will fetch and run, then
+requires confirmation — `--yes` consents in a script; `--no-input` (or a non-TTY, or
+`--json`) refuses and fetches nothing. Every installed file is **pinned** by sha256 (assets/
+sideloads) or commit (clones) in `~/.rackabel/plugins.lock`; a tampered or pin-mismatched
+file fails with exit 4 before it ever runs. Pins protect against tampering and silent
+updates — rackabel never auto-updates a plugin.
+
+A plugin runs with the §5.2 environment contract: `RACKABEL` (always the current binary),
+`RACKABEL_HOME`, and — inside a project — `RACKABEL_PROJECT_ROOT`. Vars are *unset* (not
+empty) when they don't apply, and the contract is additive over your existing environment.
+
+## Templates
+
+`new --template` scaffolds from a template repo; `new --update` re-applies it later via a
+3-way merge so a project can adopt template improvements without losing local edits.
+
+```sh
+rackabel new my-ext --template gh:owner/repo          # remote (confirmation gated)
+rackabel new my-ext --template gh:owner/repo@v2       # pin a ref
+rackabel new my-ext --template ./local-template       # a local checkout (no network)
+
+# later, after the template author ships improvements:
+rackabel new --update --dry-run                       # show the merge plan, change nothing
+rackabel new --update                                 # 3-way merge; conflicts get markers (exit 4)
+```
+
+A template is a repo with a `rackabel-template.toml` (`[prompts]` drives the wizard;
+`[merge].exclude` lists files copied verbatim, never text-merged). Files are rendered with a
+deliberately minimal `{{ key }}` placeholder (unknown keys are left verbatim). The chosen
+repo, commit, and answers are recorded in the project's `.rackabel-template` so `--update`
+re-runs the same template. A remote template is confirmation-gated exactly like a remote
+plugin install (`--yes` / `--no-input` semantics). See
+[`docs/TEMPLATES.md`](docs/TEMPLATES.md) for the template-author reference.
 
 ## Project layout
 
