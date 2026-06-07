@@ -29,6 +29,12 @@ mod dev_watch;
 mod doctor;
 // Exit-code precedence matrix (DESIGN §7) — the ship-quality centerpiece (SHIP-QUALITY).
 mod exit_codes;
+// Lifecycle hooks end to end (milestone 0.5): the pre_deploy veto + env/payload contract
+// (HOOK-ENGINE) plus the doctor_check/new_template enumerate hooks, the `plugin enable`
+// consent gate, pin-change auto-disable, and `plugin migrate` (HOOK-VERBS). Unix-only
+// (fixture hooks are shell scripts with exec bits).
+#[cfg(unix)]
+mod hooks;
 // `--json` envelope audit: success + failure object shape, stable keys, error envelope
 // on stdout (DESIGN §7) (SHIP-QUALITY).
 mod json_envelope;

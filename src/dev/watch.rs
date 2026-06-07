@@ -407,7 +407,49 @@ pub fn build_deploy_reload(changed: &ChangeSet, client: &mut Client, ctx: &Ctx) 
         &reload_resp,
         ctx,
     );
+
+    // on_reload lifecycle hooks (DESIGN §5.3) — fire AFTER the reload completes, once per
+    // reloaded extension, informational only (logged + skipped, never aborts the loop). The
+    // engine routes hook logs to stderr so the §6.2 chain line above stays the only stdout.
+    fire_on_reload_hooks(&changed.affected, &reload_resp, ctx);
+
     Ok(())
+}
+
+/// Resolve + run the `on_reload` hooks for each reloaded extension (§5.3): payload
+/// `{project_dir, manifest_toml, name, reload_ms, ok}`. The reload's overall `ok`/`reload_ms`
+/// (from the host's `ReloadResult`) are attributed to each affected extension. Best-effort:
+/// a project whose manifest can't be read for the payload is skipped.
+fn fire_on_reload_hooks(affected: &BTreeMap<String, PathBuf>, reload: &Response, ctx: &Ctx) {
+    use crate::hooks::lifecycle;
+    use crate::hooks::payload::{HookPayload, OnReloadPayload, manifest_toml_object};
+
+    let (ok, reload_ms) = match reload {
+        Response::ReloadResult { ok, reload_ms, .. } => (*ok, *reload_ms),
+        // A reload that errored out at the IPC layer never "completed" — no on_reload fires.
+        _ => return,
+    };
+
+    for (name, root) in affected {
+        let Ok(project) = Project::discover(root) else {
+            continue;
+        };
+        let manifest_path = project.root.join(crate::manifest::MANIFEST_NAME);
+        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
+            continue;
+        };
+        let Ok(manifest_toml) = manifest_toml_object(&text) else {
+            continue;
+        };
+        let payload = HookPayload::OnReload(OnReloadPayload {
+            project_dir: project.root.display().to_string(),
+            manifest_toml,
+            name: name.clone(),
+            reload_ms,
+            ok,
+        });
+        lifecycle::on_reload(ctx, &project, &payload);
+    }
 }
 
 /// Whether an extension's built bundle is stale and needs an esbuild run: missing
@@ -1373,5 +1415,175 @@ mod tests {
             !reload_seen.load(Ordering::SeqCst),
             "NO reload may be issued on a failed build"
         );
+    }
+
+    /// THE WATCH-CHAIN HOOK INTEGRATION (§5.3): with project-local `[hooks]` declaring a
+    /// `pre_deploy` (allowing) and an `on_reload`, one save through the chain must run the
+    /// `pre_deploy` gate BEFORE the deploy copy and the `on_reload` hook AFTER the reload
+    /// IPC completes. We prove ordering via marker files the fixture hooks touch + the
+    /// deployed manifest's presence, against the same fake daemon as the trap test.
+    #[test]
+    fn watch_chain_fires_pre_deploy_then_on_reload() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ul = tmp.path().join("UserLibrary");
+        std::fs::create_dir_all(ul.join("Extensions")).unwrap();
+
+        // A prebuilt fixture with a [hooks] table; the bundle is fresh so esbuild is
+        // skipped (no node needed) — post_build does NOT fire (no build ran), but the
+        // deploy's pre_deploy and the post-reload on_reload do.
+        let proj = tmp.path().join("clip-renamer");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(proj.join("hooks")).unwrap();
+        let pd_marker = proj.join("pd-ran.txt");
+        let or_marker = proj.join("or-ran.txt");
+        let deployed_manifest = ul.join("Extensions/clip-renamer/manifest.json");
+        std::fs::write(
+            proj.join("rackabel.toml"),
+            "[extension]\nname = \"clip-renamer\"\nauthor = \"t\"\nversion = \"0.1.0\"\n\
+             minimum_api_version = \"1.0.0\"\n\
+             [hooks]\npre_deploy = \"hooks/pd\"\non_reload = \"hooks/or\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("src/extension.ts"),
+            "export function activate(){}\n",
+        )
+        .unwrap();
+        let write_exec = |path: &Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            let mut p = std::fs::metadata(path).unwrap().permissions();
+            p.set_mode(0o755);
+            std::fs::set_permissions(path, p).unwrap();
+        };
+        // pre_deploy ALLOWS (exit 0) but records that the deploy had NOT yet happened when
+        // it ran (the deployed manifest must not exist yet at pre_deploy time — ordering).
+        write_exec(
+            &proj.join("hooks/pd"),
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\n\
+                 if [ -f {dm} ]; then echo TOO_LATE > {pd}; else echo OK > {pd}; fi\nexit 0\n",
+                dm = deployed_manifest.display(),
+                pd = pd_marker.display()
+            ),
+        );
+        write_exec(
+            &proj.join("hooks/or"),
+            &format!(
+                "#!/bin/sh\ncat >/dev/null\ntouch {}\nexit 0\n",
+                or_marker.display()
+            ),
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::create_dir_all(proj.join("dist")).unwrap();
+        std::fs::write(proj.join("dist/extension.js"), "module.exports={};\n").unwrap();
+        std::fs::write(
+            proj.join("manifest.json"),
+            "{\"name\":\"clip-renamer\",\"version\":\"0.1.0\",\"entry\":\"dist/extension.js\",\
+             \"minimumApiVersion\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+
+        let mut ctx = ctx_for(tmp.path());
+        ctx.ableton_user_library = Some(ul.clone());
+
+        let sock = tmp.path().join("daemon.sock");
+        let (_dbr, reload_seen) = spawn_trap_server(sock.clone(), deployed_manifest.clone());
+
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(c) = Client::connect(&sock) {
+                client = Some(c);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut client = client.expect("connect");
+
+        let plan = plan(&[entry("clip-renamer", &proj)], &ctx).unwrap();
+        let cs = plan.classify(&[proj.join("src/extension.ts")]);
+        build_deploy_reload(&cs, &mut client, &ctx).expect("chain runs");
+
+        assert!(reload_seen.load(Ordering::SeqCst), "the reload IPC fired");
+        let pd = std::fs::read_to_string(&pd_marker).expect("pre_deploy ran");
+        assert_eq!(
+            pd.trim(),
+            "OK",
+            "pre_deploy must run before the deploy copy"
+        );
+        assert!(or_marker.is_file(), "on_reload must run after the reload");
+        assert!(deployed_manifest.is_file(), "the bundle was deployed");
+    }
+
+    /// A `pre_deploy` veto in the watch chain ABORTS that extension's chain step (the
+    /// deploy errors) so NO reload is issued — the host keeps its last-good artifact.
+    #[test]
+    fn watch_chain_pre_deploy_veto_blocks_reload() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ul = tmp.path().join("UserLibrary");
+        std::fs::create_dir_all(ul.join("Extensions")).unwrap();
+
+        let proj = tmp.path().join("clip-renamer");
+        std::fs::create_dir_all(proj.join("src")).unwrap();
+        std::fs::create_dir_all(proj.join("hooks")).unwrap();
+        std::fs::write(
+            proj.join("rackabel.toml"),
+            "[extension]\nname = \"clip-renamer\"\nauthor = \"t\"\nversion = \"0.1.0\"\n\
+             minimum_api_version = \"1.0.0\"\n[hooks]\npre_deploy = \"hooks/pd\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj.join("src/extension.ts"),
+            "export function activate(){}\n",
+        )
+        .unwrap();
+        let pd = proj.join("hooks/pd");
+        std::fs::write(&pd, "#!/bin/sh\ncat >/dev/null\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&pd).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&pd, perms).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::create_dir_all(proj.join("dist")).unwrap();
+        std::fs::write(proj.join("dist/extension.js"), "module.exports={};\n").unwrap();
+        std::fs::write(
+            proj.join("manifest.json"),
+            "{\"name\":\"clip-renamer\",\"version\":\"0.1.0\",\"entry\":\"dist/extension.js\",\
+             \"minimumApiVersion\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+
+        let mut ctx = ctx_for(tmp.path());
+        ctx.ableton_user_library = Some(ul.clone());
+
+        let sock = tmp.path().join("daemon.sock");
+        let deployed_manifest = ul.join("Extensions/clip-renamer/manifest.json");
+        let (_dbr, reload_seen) = spawn_trap_server(sock.clone(), deployed_manifest.clone());
+
+        let mut client = None;
+        for _ in 0..50 {
+            if let Ok(c) = Client::connect(&sock) {
+                client = Some(c);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut client = client.expect("connect");
+
+        let plan = plan(&[entry("clip-renamer", &proj)], &ctx).unwrap();
+        let cs = plan.classify(&[proj.join("src/extension.ts")]);
+        let result = build_deploy_reload(&cs, &mut client, &ctx);
+        assert!(
+            result.is_err(),
+            "a pre_deploy veto must error the chain step"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !reload_seen.load(Ordering::SeqCst),
+            "a vetoed deploy issues NO reload (host keeps last-good)"
+        );
+        assert!(!deployed_manifest.is_file(), "the veto blocked the copy");
     }
 }

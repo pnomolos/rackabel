@@ -22,6 +22,7 @@
 
 pub mod discovery;
 pub mod engine;
+pub mod lifecycle;
 pub mod manifest;
 pub mod outcome;
 pub mod payload;

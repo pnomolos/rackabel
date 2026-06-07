@@ -106,6 +106,13 @@ fn deploy_extension(project: &Project, args: &DeployArgs, ctx: &Ctx) -> CmdResul
         .at(bundle_src.display().to_string()));
     }
 
+    // pre_deploy lifecycle hooks (DESIGN §5.3) — the ONE veto, run BEFORE any copy into
+    // the User Library. A nonzero/timeout from any enabled gate (a notarize check, etc.)
+    // aborts the deploy with the §6.1 frame naming the hook; the last-good deployed artifact
+    // is untouched. This also guards the daemon deploy path (it calls deploy::run), where a
+    // veto is caught per-extension and the host keeps last-good.
+    run_pre_deploy_hooks(project, &ext, &bundle_src, &ul, &slug, ctx)?;
+
     // Native deps: build them first if --fix, then audit; a missing .node is the
     // §3.7 plain-English error pointing at --fix (never a bare pnpm command).
     if args.fix {
@@ -146,6 +153,46 @@ fn deploy_extension(project: &Project, args: &DeployArgs, ctx: &Ctx) -> CmdResul
 
     report_success(&dest, &slug, built.rebuilt, &report, ctx);
     Ok(())
+}
+
+/// Resolve + run the `pre_deploy` hooks (§5.3) before any User-Library mutation. Returns
+/// the framed veto error (RK1310, or RK1311 for a timeout) when a gate refuses; `Ok(())`
+/// when every hook (or none) allows the deploy. The payload carries the exact §5.3 fields:
+/// `{project_dir, manifest_toml, bundle_path, user_library, slug}`. A manifest that can't be
+/// read/parsed for the payload is itself a deploy-aborting error (we never deploy past a hook
+/// we couldn't even feed) — but that is the same RK0003 the rest of deploy would already hit.
+fn run_pre_deploy_hooks(
+    project: &Project,
+    ext: &ResolvedExtension,
+    bundle_src: &Path,
+    ul: &UserLibrary,
+    slug: &str,
+    ctx: &Ctx,
+) -> CmdResult<()> {
+    use crate::hooks::lifecycle;
+    use crate::hooks::payload::{HookPayload, PreDeployPayload, manifest_toml_object};
+
+    let _ = ext; // payload carries the parsed manifest, not the resolved extension.
+    let manifest_path = project.root.join(crate::manifest::MANIFEST_NAME);
+    let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        RkError::new(
+            ErrorCode::DeployCopyFailed,
+            ExitClass::BuildRuntime,
+            "could not read rackabel.toml to run the pre_deploy hooks",
+            "check the file exists and is readable, then retry",
+        )
+        .at(manifest_path.display().to_string())
+        .raw(e.into())
+    })?;
+    let manifest_toml = manifest_toml_object(&text)?;
+    let payload = HookPayload::PreDeploy(PreDeployPayload {
+        project_dir: project.root.display().to_string(),
+        manifest_toml,
+        bundle_path: bundle_src.display().to_string(),
+        user_library: ul.path.display().to_string(),
+        slug: slug.to_string(),
+    });
+    lifecycle::pre_deploy(ctx, project, &payload)
 }
 
 /// `--undo`: remove the deployed `<UserLibrary>/Extensions/<slug>` folder, but only
