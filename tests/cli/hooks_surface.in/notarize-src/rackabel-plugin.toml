@@ -1,0 +1,4 @@
+hook_api = 1
+[hooks]
+pre_deploy = "hook.sh"
+doctor_check = "hook.sh"

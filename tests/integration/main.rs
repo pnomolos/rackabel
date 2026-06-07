@@ -41,6 +41,11 @@ mod plugin;
 // PLUGIN-MGMT). Unix-only (fixture plugins are shell scripts; symlink + exec-bit asserts).
 #[cfg(unix)]
 mod plugin_mgmt;
+// Lifecycle-hook verbs (milestone 0.5, HOOK-VERBS): doctor_check + new_template enumerate
+// hooks, the `plugin enable` consent gate, pin-change auto-disable, and `plugin migrate`.
+// Unix-only (fixture hook scripts have exec bits).
+#[cfg(unix)]
+mod hooks;
 mod validate;
 
 use assert_cmd::prelude::*;

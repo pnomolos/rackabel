@@ -37,6 +37,7 @@ fn cli() {
         std::path::Path::new("rk-home-plugin"),
         std::path::Path::new("tests/cli/dev_registry.in/rk-home-reg"),
         std::path::Path::new("tests/cli/dev_register_names.in/rk-home-names"),
+        std::path::Path::new("tests/cli/hooks_surface.in/rk-home-hooks"),
     ] {
         let _ = std::fs::remove_dir_all(stale);
     }

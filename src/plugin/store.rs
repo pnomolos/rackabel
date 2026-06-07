@@ -736,14 +736,22 @@ fn report_installed(
         ctx,
     );
     if resolved.has_manifest {
-        ui::frame::note(
-            &format!(
-                "carries a rackabel-plugin.toml with {} hook(s) — disabled (run `rackabel \
-                 plugin enable {name}` to consent; hooks run in a later release)",
+        // A hook plugin installs disabled (enabling is the §5.7 consent gate). On a reinstall
+        // whose CODE CHANGED, §5.7 requires it be DISABLED so new code never runs under
+        // consent given for the old code — call that out explicitly with the re-enable step.
+        let why = if was_installed && code_changed {
+            format!(
+                "its code changed, so it was DISABLED — run `rackabel plugin enable {name}` to \
+                 re-consent before its hooks run again (new code never runs under old consent)"
+            )
+        } else {
+            format!(
+                "carries a rackabel-plugin.toml with {} hook(s) — disabled until you run \
+                 `rackabel plugin enable {name}` to consent (enabling runs its hooks)",
                 resolved.hooks.len()
-            ),
-            ctx,
-        );
+            )
+        };
+        ui::frame::note(&why, ctx);
     }
 }
 

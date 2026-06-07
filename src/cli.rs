@@ -142,8 +142,9 @@ pub enum Command {
 
 // --- the `plugin` group (DESIGN §2 plugin table, §5.4) -------------------------
 
-/// `rackabel plugin <verb>` — install/list/which/run/enable/disable/search (§5.4). The
-/// `migrate` verb (hook-contract codemod) is a 0.5 feature and is deliberately absent.
+/// `rackabel plugin <verb>` — install/list/which/run/enable/disable/search/migrate (§5.4,
+/// §5.3). `migrate` (hook-contract codemod) lands in 0.5 as the SURFACE only: the codemod
+/// machinery is deferred, but the detect-and-frame behavior ships (see D-100).
 #[derive(Args, Debug)]
 pub struct PluginArgs {
     #[command(subcommand)]
@@ -162,12 +163,39 @@ pub enum PluginCommand {
     Which(PluginNameArgs),
     /// Run a plugin even if a built-in shadows the name, forwarding trailing args.
     Run(PluginRunArgs),
-    /// Enable a plugin (and, in 0.5, its hooks).
-    Enable(PluginNameArgs),
+    /// Enable a plugin and consent to running its lifecycle hooks (§5.3/§5.7).
+    Enable(PluginEnableArgs),
     /// Disable a plugin (and, in 0.5, its hooks).
     Disable(PluginNameArgs),
     /// Query the `rackabel-plugin` GitHub topic.
     Search(PluginSearchArgs),
+    /// Codemod a plugin's hooks across a `hook_api` bump (§5.3). Today `hook_api = 1` is
+    /// the only contract: a plugin targeting it reports "nothing to migrate"; a higher
+    /// `hook_api` is an unsupported frame (the codemod machinery is deferred).
+    Migrate(PluginMigrateArgs),
+}
+
+/// `rackabel plugin enable <name> [--yes] [--json]` — enabling IS the hook consent gate
+/// (§5.7). When the plugin carries lifecycle hooks, enable prints what hooks will run at
+/// which lifecycle points (and the on-every-save implication for `dev`) and requires
+/// confirmation; `--yes` scripts that consent, `--no-input` refuses (no implicit consent).
+#[derive(Args, Debug)]
+pub struct PluginEnableArgs {
+    /// The plugin name to enable.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Consent to running this plugin's hooks without an interactive prompt (§5.7).
+    #[arg(long)]
+    pub yes: bool,
+}
+
+/// `rackabel plugin migrate <name> [--json]` (§5.3).
+#[derive(Args, Debug)]
+pub struct PluginMigrateArgs {
+    /// The plugin name to inspect for a `hook_api` migration.
+    #[arg(value_name = "NAME")]
+    pub name: String,
 }
 
 /// `rackabel plugin install OWNER/REPO|<path|tarball> [--yes] [--json] [--force]`
