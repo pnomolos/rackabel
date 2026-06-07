@@ -40,6 +40,16 @@ pub fn run(args: &PluginRunArgs, ctx: &Ctx) -> CmdResult<()> {
         }
     };
 
+    // Tamper check (§5.7): the escape hatch runs the MANAGED (lock-recorded) executable
+    // when one exists (`plugin_path` returns managed-bin first), so it must enforce the
+    // SAME `plugins.lock` pin the bare dispatch does (external.rs) — a modified store file
+    // is `RK4007` (exit 4) BEFORE any code runs. `plugin run` deliberately ignores the
+    // disabled flag (it always reaches the plugin), but it must NOT bypass the pin: the
+    // sha256/commit guarantee that installed code hasn't been swapped applies on every path
+    // that executes a managed plugin. An unmanaged `$PATH` copy has no lock entry and is
+    // run as-is (the user owns it). PLUGIN-MGMT-owned hook.
+    crate::plugin::store::verify_managed(ctx, name)?;
+
     let project = env_contract::resolve_project_root(ctx);
     let env = env_contract::build(ctx, project.as_deref());
 

@@ -45,17 +45,24 @@ pub struct RenderOutcome {
 /// `accept_yes` is the `--yes` consent (also true under `--no-input` *only* for accepting
 /// prompt defaults — the remote confirmation under `--no-input` still refuses unless
 /// `--yes` is explicitly set, which the caller passes as `accept_yes`).
+///
+/// `seed` pre-fills prompt answers by key (and SKIPS those prompts — the §5.5 "re-prompt
+/// only for NEW prompts" rule). The caller seeds the positional project name under `name`
+/// so `new myproj --template …` renders `myproj`, not the template's default `name` — the
+/// explicitly-typed name governs both the folder AND the content, even under
+/// `--no-input`/`--yes`.
 pub fn render_into(
     raw: &str,
     dest: &Path,
+    seed: &BTreeMap<String, String>,
     accept_yes: bool,
     ctx: &Ctx,
 ) -> CmdResult<RenderOutcome> {
     let source = TemplateSource::parse(raw).ok_or_else(|| invalid_ref(raw))?;
     let resolved = render::resolve(&source, raw, accept_yes, ctx)?;
 
-    // Run the prompts (no seed — a fresh scaffold).
-    let answers = render::run_prompts(&resolved.manifest, &BTreeMap::new(), accept_yes, ctx)?;
+    // Seed the prompts (the positional name pre-fills `name`); only NEW prompts are asked.
+    let answers = render::run_prompts(&resolved.manifest, seed, accept_yes, ctx)?;
 
     let exclude = ExcludeSet::new(&resolved.manifest.merge.exclude);
     std::fs::create_dir_all(dest).map_err(|e| {

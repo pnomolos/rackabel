@@ -1185,14 +1185,18 @@ lockfile, so the enabled-state gate lives in `plugin::store::is_managed_disabled
 consulted by `commands::plugin::external::run` (the bare `rackabel <foo>` path): a disabled
 managed copy is skipped with a note, falling back to a `$PATH` `rackabel-<foo>` if one exists,
 else `RK0401` ("installed but disabled"). `plugin run` (the §5.6 escape hatch) deliberately
-IGNORES the flag and always reaches the plugin. `plugin which` is left to the foundation as-is
-(it reports resolution, not enabled-state). The SAME dispatch site also calls
-`store::verify_managed` (the §5.7 tamper check) before running a managed copy: a modified
-store file fails its lockfile sha256 pin with `RK4007` (exit 4) before any code runs; an
-unmanaged `$PATH` plugin has no pin and is run as-is. **Integrator note:** `external.rs` is
-the only foundation-owned command file this agent edits (two added calls into this agent's
-`store.rs`: `is_managed_disabled` and `verify_managed`); both gate functions live in
-`store.rs`.
+IGNORES the **enabled** flag and always reaches the plugin — but it does NOT bypass the pin:
+it calls `store::verify_managed` for the SAME §5.7 tamper guarantee the bare dispatch
+enforces (see below), so a tampered managed store file fails `RK4007` (exit 4) on the escape
+hatch too, before any code runs. (The escape hatch is for running a *disabled* or
+*built-in-shadowed* plugin, never for running *modified* code past its pin.) `plugin which`
+is left to the foundation as-is (it reports resolution, not enabled-state). The bare dispatch
+site ALSO calls `store::verify_managed` (the §5.7 tamper check) before running a managed
+copy: a modified store file fails its lockfile sha256 pin with `RK4007` (exit 4) before any
+code runs; an unmanaged `$PATH` plugin has no pin and is run as-is. **Integrator note:**
+`external.rs` is the only foundation-owned command file this agent edits (two added calls
+into this agent's `store.rs`: `is_managed_disabled` and `verify_managed`); both gate
+functions live in `store.rs`. `plugin run` (PLUGIN-MGMT-owned) calls `verify_managed` too.
 
 ### D-93. New seam `RACKABEL_GITHUB_DL` + HTTP/tar/gzip deps for the install/search bodies (DESIGN §5.4, D-85)
 
@@ -1208,6 +1212,14 @@ with a throwaway in-process `TcpListener`, so the suite NEVER touches the networ
 fetch is exercised manually. Every network failure (transport, 403/429 rate limit, 5xx) maps
 to the clean `RK0404 NoNetwork` frame; a 404 on `OWNER/REPO` is `RK0401 PluginNotFound`.
 
+All three HTTP calls (the search query, `releases/latest`, and the asset download) go through
+a shared `ureq::Agent` (`store::http_agent`) configured with explicit connect (10s) and
+read/write (60s) timeouts. ureq 2.x applies NO timeout unless one is set, so a stalled or
+half-open GitHub connection would otherwise hang `plugin install`/`search` forever; the
+timeouts surface a stall as a transport error → the existing `RK0404` frame. (Proxy env vars
+are still not honored — ureq does not read `HTTP(S)_PROXY` automatically; explicit proxy
+support is a later improvement.)
+
 ### D-94. `OWNER/REPO` clone-with-no-build is a clear frame, not a silent success (DESIGN §5.4)
 
 For `plugin install OWNER/REPO`, 0.4 implements the **release-asset** path (preferred:
@@ -1218,6 +1230,15 @@ clear `RK0401` frame (naming the cloned commit) pointing the user at publishing 
 asset or sideloading a locally-built executable — never a silent "installed nothing". The
 asset path is the intended production route; the full auto-build of an arbitrary repo is left
 for a later milestone.
+
+A clone-resolved entry records BOTH a `commit` (provenance + what `enforce_pin` compares on
+reinstall, since its SourceKind is `Gh`) AND a `sha256` of the resolved executable. The
+sha256 is the byte pin the §5.7 runtime tamper check (`verify_entry`) needs: without it, a
+commit-only entry made `verify_entry` a no-op, so a clone-built plugin's store bytes could be
+swapped post-install and run undetected on BOTH dispatch paths. Recording the exe's sha256
+makes EVERY managed plugin byte-verifiable at dispatch regardless of source kind. (A legacy
+entry written before this change carries no sha256 and cannot be byte-verified until it is
+reinstalled; `verify_entry` passes such an entry rather than failing closed on absent data.)
 
 ## 0.4 templates (`new --template` render + `new --update` 3-way merge)
 
@@ -1233,6 +1254,16 @@ D-86's invariants survive verbatim: a malformed ref is `RK0101`; a remote ref un
 `--no-input` without `--yes` REFUSES (`RK0403`) — never a silent default. The frozen
 classification (`TemplateSource`), the lockfile models (`plugin::template`), and the network
 seams (`RACKABEL_TEMPLATE_GIT_BASE`) the foundation froze are reused unchanged.
+
+The explicitly-typed positional project name SEEDS the template's `name` prompt: `new myproj
+--template …` renders `myproj` (folder AND content) rather than the template's default
+`name`, matching the §6.2 model where `new clip-renamer` yields a clip-renamer-named project.
+Mechanically, `new_from_template` passes a `{ name: <typed> }` seed into `render_into`, which
+threads it to `run_prompts`; per the §5.5 "re-prompt only for NEW prompts" rule a seeded
+prompt is used verbatim and not re-asked (so the typed name governs even under
+`--no-input`/`--yes`). A template that declares no `name` prompt simply ignores the seed;
+other prompts (e.g. `author`) still resolve from their own defaults/answers. The persisted
+`.rackabel-template` records the seeded name so `new --update` re-uses it.
 
 ### D-96. The placeholder syntax is a deliberately minimal `{{ key }}` (DESIGN §5.5 "declarative data, never dependent on rackabel internals")
 

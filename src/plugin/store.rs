@@ -567,12 +567,19 @@ fn resolve_clone_and_build(
         set_executable(&exe)?;
         let exe_dir = exe.parent().unwrap_or(&checkout);
         let (has_manifest, hooks) = read_manifest(exe_dir)?;
+        // Record a sha256 of the resolved executable IN ADDITION to the commit. The commit
+        // pins provenance (and is what `enforce_pin` compares on reinstall, since SourceKind
+        // is Gh), but the §5.7 runtime tamper check (`verify_entry`) byte-verifies the
+        // on-disk file against `sha256`. Without it, a clone-built plugin's store bytes could
+        // be swapped post-install and run undetected on BOTH dispatch paths. Hashing the
+        // exe here closes that gap so every managed plugin is byte-verifiable at dispatch.
+        let sha = sha256::hash_file(&exe)?;
         return Ok(Resolved {
             name: name.to_string(),
             kind: SourceKind::Gh,
             exe_in_store: exe,
             commit: Some(commit),
-            sha256: None,
+            sha256: Some(sha),
             has_manifest,
             hooks,
         });
@@ -651,8 +658,11 @@ fn enforce_pin(
 }
 
 /// Verify an installed plugin's on-disk executable still matches its lockfile pin (§5.4).
-/// A tamper (a modified file) is `RK4007` (exit 4). Only sha256-pinned entries are
-/// byte-verifiable here; a commit-pinned clone is verified at fetch time.
+/// A tamper (a modified file) is `RK4007` (exit 4). Every managed source kind now records a
+/// sha256 of the resolved executable (a clone-built plugin records BOTH a commit for
+/// provenance AND a sha256 for byte-verification), so any entry carrying a sha256 is
+/// byte-verified here. A legacy entry written without a sha256 cannot be byte-verified and
+/// passes (it predates the byte pin); reinstalling it records the sha256.
 pub fn verify_entry(entry: &PluginLockEntry) -> CmdResult<()> {
     if let Some(expected) = &entry.sha256 {
         // Verify the symlink TARGET (the store file), following the managed-bin symlink.
@@ -942,10 +952,24 @@ fn http_get_bytes(url: &str) -> CmdResult<Vec<u8>> {
     Ok(buf)
 }
 
+/// A shared HTTP agent with connect/read/write timeouts so a stalled or half-open GitHub
+/// connection surfaces as `RK0404` instead of hanging forever (ureq applies NO timeout
+/// unless one is configured). Used for the `releases/latest` query and the release-asset
+/// download; `plugin search` builds an equivalent agent via [`http_agent`].
+pub(crate) fn http_agent() -> ureq::Agent {
+    use std::time::Duration;
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(60))
+        .timeout_write(Duration::from_secs(60))
+        .build()
+}
+
 /// A single HTTP GET behind the network seams, mapping every failure to `RK0404`
 /// (no-network/rate-limit). A 403/429 is the GitHub rate-limit signal.
 fn http_get(url: &str) -> CmdResult<ureq::Response> {
-    match ureq::get(url)
+    match http_agent()
+        .get(url)
         .set("User-Agent", "rackabel")
         .set("Accept", "application/vnd.github+json")
         .call()
@@ -1130,6 +1154,36 @@ mod tests {
         assert_eq!(err.class, ExitClass::Validation);
         // With --force it is allowed (announced).
         assert!(enforce_pin(&ctx, &prev, &diff, true).is_ok());
+    }
+
+    #[test]
+    fn verify_entry_byte_verifies_clone_built_commit_plus_sha256() {
+        // A clone-built (Gh) plugin now records BOTH a commit (provenance) AND a sha256
+        // (the byte pin). `verify_entry` must byte-verify it — a tampered store file fails
+        // RK4007 even though the entry is commit-pinned. (Regression: previously a
+        // commit-only entry made verify_entry a no-op, so tamper went undetected.)
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("rackabel-clonebuilt");
+        std::fs::write(&exe, b"BUILT-BYTES").unwrap();
+        let sha = sha256::hash_file(&exe).unwrap();
+        let entry = PluginLockEntry {
+            name: "clonebuilt".into(),
+            source: SourceKind::Gh,
+            origin: "owner/repo".into(),
+            commit: Some("abc123".into()),
+            sha256: Some(sha),
+            installed_at: "t".into(),
+            executable: exe.clone(),
+            has_plugin_manifest: false,
+            hooks: vec![],
+            enabled: true,
+        };
+        // Untampered: passes.
+        assert!(verify_entry(&entry).is_ok());
+        // Tampered store bytes: RK4007.
+        std::fs::write(&exe, b"TAMPERED").unwrap();
+        let err = verify_entry(&entry).unwrap_err();
+        assert_eq!(err.code, ErrorCode::PinMismatch);
     }
 
     fn test_ctx() -> Ctx {

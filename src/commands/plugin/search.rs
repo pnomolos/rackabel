@@ -138,7 +138,10 @@ fn urlencode(s: &str) -> String {
 }
 
 fn http_get_string(url: &str) -> CmdResult<String> {
-    match ureq::get(url)
+    // Reuse the timeout-configured agent so a stalled GitHub search connection surfaces as
+    // RK0404 rather than hanging forever (ureq applies no timeout unless one is set).
+    match crate::plugin::store::http_agent()
+        .get(url)
         .set("User-Agent", "rackabel")
         .set("Accept", "application/vnd.github+json")
         .call()

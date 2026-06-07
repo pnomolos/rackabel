@@ -195,8 +195,8 @@ fn new_extension(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
 fn new_from_template(tref: &str, args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
     // The directory name: the positional name (required for a template scaffold — the
     // template's prompts may also ask for a name, but the project FOLDER needs one now).
-    let dir_name = match &args.name {
-        Some(n) => dir_name_of(n),
+    let typed_name = match &args.name {
+        Some(n) => n.clone(),
         None => {
             return Err(RkError::of(
                 ErrorCode::UsageError,
@@ -205,6 +205,7 @@ fn new_from_template(tref: &str, args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
             ));
         }
     };
+    let dir_name = dir_name_of(&typed_name);
 
     let root = ctx.cwd.join(&dir_name);
     if root.exists() {
@@ -220,10 +221,17 @@ fn new_from_template(tref: &str, args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
         println!("  Resolving template {tref}…");
     }
 
+    // Seed the template's `name` prompt with the explicitly-typed positional name so the
+    // rendered content matches the folder (`new myproj --template …` renders `myproj`, not
+    // the template's default name) — even under `--no-input`/`--yes`. A template without a
+    // `name` prompt simply ignores the seed.
+    let mut seed = std::collections::BTreeMap::new();
+    seed.insert("name".to_string(), typed_name.clone());
+
     // Render: resolve (+ remote confirm) + prompt + substitute + write the lockfile. On
     // any failure before files land, nothing is left behind; if files were partially
     // written the directory exists and the framed error names the problem.
-    let outcome = crate::templates::render_into(tref, &root, args.yes, ctx)?;
+    let outcome = crate::templates::render_into(tref, &root, &seed, args.yes, ctx)?;
 
     // git-init by default (unless --no-git / --minimal), mirroring the built-in path.
     if resolve_git(args) {

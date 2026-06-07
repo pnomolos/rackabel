@@ -271,6 +271,45 @@ fn tampered_installed_file_fails_verify_exit_4() {
         .stdout(predicate::str::contains("TAMPERED").not());
 }
 
+/// The §5.6 escape hatch `plugin run <name>` runs the SAME managed store file the bare
+/// dispatch does, so it must enforce the SAME §5.7 pin/tamper check: a tampered store file
+/// fails RK4007 (exit 4) and the tampered code never runs. (Regression: `plugin run`
+/// previously skipped `verify_managed`, executing modified bytes silently.)
+#[test]
+fn tampered_installed_file_fails_plugin_run_too_exit_4() {
+    let home = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+    let src = work.path().join("rackabel-greet");
+    write_plugin_script(&src, "GREET-RAN");
+
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "install", src.to_str().unwrap(), "--yes"])
+        .assert()
+        .success();
+
+    // `plugin run` works while the bytes match the pin.
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "run", "greet"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("GREET-RAN"));
+
+    // TAMPER: rewrite the installed store file (the symlink target) in place.
+    let link = managed_bin(home.path(), "greet");
+    let target = std::fs::canonicalize(&link).unwrap();
+    write_plugin_script(&target, "TAMPERED-VIA-RUN");
+
+    // The escape hatch now fails the pin verification (RK4007, exit 4) BEFORE running the
+    // tampered code — the tampered marker must NOT print.
+    rackabel_cmd(home.path(), work.path())
+        .args(["plugin", "run", "greet"])
+        .assert()
+        .failure()
+        .code(4)
+        .stderr(predicate::str::contains("RK4007"))
+        .stdout(predicate::str::contains("TAMPERED-VIA-RUN").not());
+}
+
 // --- enable / disable dispatch gating ------------------------------------------
 
 /// `disable` flips the lock flag and gates dispatch: a disabled managed plugin is skipped in

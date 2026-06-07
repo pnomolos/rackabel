@@ -108,7 +108,9 @@ exclude = ["vendor/**"]
 
 /// A local-path template renders with prompts resolved from defaults (under --no-input),
 /// substitutes `{{ }}` placeholders, persists answers in `.rackabel-template`, and leaves
-/// excluded files verbatim.
+/// excluded files verbatim. The explicitly-typed positional name SEEDS the template's
+/// `name` prompt, so the rendered content matches the folder (`new clip-renamer` renders
+/// `clip-renamer`, NOT the template's default `my-ext`), even under --no-input.
 #[test]
 fn local_template_renders_with_answers_persisted() {
     if !has_git() {
@@ -131,17 +133,18 @@ fn local_template_renders_with_answers_persisted() {
         ));
 
     let proj = work.path().join("clip-renamer");
-    // Placeholders substituted (the default `name = my-ext` is used under --no-input).
+    // The positional name seeds the `name` prompt: content matches the folder. The `author`
+    // prompt (no seed) falls back to its default under --no-input.
     let readme = std::fs::read_to_string(proj.join("README.md")).unwrap();
-    assert_eq!(readme, "# my-ext\nby Anon\n");
+    assert_eq!(readme, "# clip-renamer\nby Anon\n");
     // Excluded vendor file copied verbatim (placeholder NOT substituted).
     let blob = std::fs::read_to_string(proj.join("vendor/blob.tgz")).unwrap();
     assert!(blob.contains("{{ name }}"));
     // The template manifest itself is not copied into the project.
     assert!(!proj.join("rackabel-template.toml").exists());
-    // The lockfile persists repo + commit + answers for `new --update`.
+    // The lockfile persists repo + commit + the SEEDED name for `new --update`.
     let lock = std::fs::read_to_string(proj.join(".rackabel-template")).unwrap();
-    assert!(lock.contains("name = \"my-ext\""));
+    assert!(lock.contains("name = \"clip-renamer\""));
     assert!(lock.contains("commit ="));
 }
 
@@ -205,8 +208,10 @@ fn gh_template_renders_via_file_seam_with_yes() {
             "created remote-proj/ from template",
         ));
 
+    // The positional name `remote-proj` seeds the template's `name` prompt (overriding the
+    // template default `remote-ext`), so the rendered content matches the folder.
     let readme = std::fs::read_to_string(work.path().join("remote-proj/README.md")).unwrap();
-    assert_eq!(readme, "# remote-ext (remote)\n");
+    assert_eq!(readme, "# remote-proj (remote)\n");
     let lock = std::fs::read_to_string(work.path().join("remote-proj/.rackabel-template")).unwrap();
     assert!(lock.contains("repo = \"gh:owner/repo\""));
 }
@@ -390,8 +395,9 @@ fn update_prompts_for_new_prompt_only() {
         .success();
 
     let readme = std::fs::read_to_string(proj.join("README.md")).unwrap();
-    // name re-used from saved answers; tagline resolved from the NEW prompt's default.
-    assert!(readme.contains("# my-ext"));
+    // name re-used from saved answers (seeded from the positional `proj` at render time);
+    // tagline resolved from the NEW prompt's default.
+    assert!(readme.contains("# proj"));
     assert!(readme.contains("a great extension"));
     // The new answer is now persisted for the next update.
     let lock = std::fs::read_to_string(proj.join(".rackabel-template")).unwrap();
