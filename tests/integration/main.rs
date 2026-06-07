@@ -3,6 +3,7 @@
 //! builder) + the cross-cutting tests below (exit codes, error framing, resolution
 //! orders observed end-to-end).
 
+mod build;
 mod common;
 
 use assert_cmd::prelude::*;

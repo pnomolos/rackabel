@@ -1,0 +1,7 @@
+# Fully specified so `build` echoes no inference notes (deterministic transcript).
+[extension]
+name = "Clip Renamer"
+author = "Jane Doe"
+version = "0.1.0"
+entry = "src/extension.ts"
+minimum_api_version = "1.0.0"

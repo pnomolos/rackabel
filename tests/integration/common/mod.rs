@@ -137,6 +137,103 @@ pub fn rackabel_cmd(home: &Path, cwd: &Path) -> Command {
     cmd
 }
 
+/// Copy the committed `tests/fixtures/<name>` project into a fresh temp dir and
+/// return both the holding `TempDir` and the project root inside it. Tests mutate the
+/// copy (build writes `dist/`, `manifest.json`, `.rackabel/`) without touching the
+/// committed fixture.
+pub fn fixture_project(name: &str) -> (TempDir, PathBuf) {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    let tmp = TempDir::new().expect("tempdir");
+    let dst = tmp.path().join(name);
+    copy_dir(&src, &dst);
+    (tmp, dst)
+}
+
+fn copy_dir(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).unwrap();
+    for entry in std::fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir(&from, &to);
+        } else {
+            std::fs::copy(&from, &to).unwrap();
+        }
+    }
+}
+
+/// Resolve a real `node` on `PATH` that can `require.resolve("esbuild")` from the
+/// given project root. Returns the node path if a usable node+esbuild pair exists, so
+/// real end-to-end build tests can gate on it (and skip with a clear message
+/// otherwise — esbuild may be unavailable in CI).
+pub fn usable_node_with_esbuild(project_root: &Path) -> Option<PathBuf> {
+    let node = which_node()?;
+    let probe = format!(
+        "try {{ require.resolve('esbuild', {{ paths: [{:?}] }}); process.exit(0); }} \
+         catch (e) {{ process.exit(7); }}",
+        project_root.to_string_lossy()
+    );
+    let ok = Command::new(&node)
+        .args(["-e", &probe])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok { Some(node) } else { None }
+}
+
+/// A `node` on PATH (regardless of esbuild). Used to gate `node --check`-only paths.
+pub fn which_node() -> Option<PathBuf> {
+    let out = Command::new("sh")
+        .args(["-c", "command -v node"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if p.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(p))
+    }
+}
+
+/// Symlink (or copy) a resolvable `esbuild` package into `<project_root>/node_modules`
+/// so a hermetic build can find it without a network `npm install`. Resolves the
+/// esbuild package directory via the given `node`. Returns `true` on success.
+pub fn vendor_esbuild_into(node: &Path, source_root: &Path, project_root: &Path) -> bool {
+    // Find esbuild's package dir reachable from `source_root`.
+    let script = format!(
+        "const path=require('node:path'); \
+         try {{ const p=require.resolve('esbuild/package.json',{{paths:[{:?}]}}); \
+         process.stdout.write(path.dirname(p)); }} catch(e) {{ process.exit(7); }}",
+        source_root.to_string_lossy()
+    );
+    let out = match Command::new(node).args(["-e", &script]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+    let pkg_dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    if !pkg_dir.is_dir() {
+        return false;
+    }
+    let nm = project_root.join("node_modules");
+    std::fs::create_dir_all(&nm).ok();
+    let link = nm.join("esbuild");
+    #[cfg(unix)]
+    {
+        let _ = std::os::unix::fs::symlink(&pkg_dir, &link);
+    }
+    #[cfg(not(unix))]
+    {
+        copy_dir(&pkg_dir, &link);
+    }
+    link.exists()
+}
+
 /// Build the bytes of a tiny Mach-O (fat or thin) header for the given arch.
 fn macho_bytes(arch: FakeArch) -> Vec<u8> {
     const CPU_X86_64: i32 = 0x0100_0007;

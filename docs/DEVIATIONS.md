@@ -72,6 +72,47 @@ the surface.
 
 ---
 
+## 0.2 build
+
+### D-8. Bundle `>10KB` sanity check is warn-only, not a hard failure (DESIGN §2 / SPEC A §5)
+
+SPEC A §5 / `pack-extension.js` treats a sub-10KB `dist/extension.js` as a hard
+error, because a real extension always bundles the SDK (verified: the public
+extensions bundle to 45KB–258KB). A *minimal* or SDK-less project — a test fixture,
+or a future `new --minimal` skeleton, or an extension that legitimately imports
+nothing from the SDK — can produce a smaller bundle that still passes `node --check`
+and is perfectly valid. So at **build** time rackabel keeps the 10KB floor as a
+**non-fatal warning** (the `[!]` line), not a build failure: a valid, parseable small
+bundle is not a build error. The hard `node --check` gate (RK1303) is unchanged.
+`pack`/`validate` may apply the floor more strictly for distribution artifacts; that
+is the pack/validate owners' call. DESIGN §2 explicitly anticipates this ("verify
+against SPEC A; deviate via DEVIATIONS.md if the template bundle is legitimately
+smaller").
+
+### D-9. esbuild + `tsc` are driven through the project toolchain, not a vendored copy (DESIGN §2, §4.6 / SPEC B §2)
+
+rackabel owns the esbuild *invocation* (so it can bake the polyfill banner the
+official `build.ts` omits), but esbuild itself is resolved from the **project's**
+`node_modules` via `require.resolve("esbuild", { paths: [projectRoot] })` (which
+handles both the npm-hoisted and pnpm `.pnpm/...` layouts), run inside a one-shot
+`node -e` process — matching the arclight `scripts/build-extension.js` JS-API model
+(SPEC B §2). Likewise `--typecheck` runs the project's pinned `typescript`'s `tsc
+--noEmit`. This keeps the dev/CI/build environments byte-identical to what `npm
+install` produced and avoids shipping a second esbuild. A missing node is an
+environment error (RK0305, "install Live / Node"); a missing esbuild/typescript is a
+build error (RK1301/RK1302) with an `npm install` remedy — never a raw
+module-not-found or "node not found".
+
+### D-10. Build hash is a non-cryptographic FNV-1a, not a content digest (DESIGN §2)
+
+DESIGN §2 asks for a short build hash so "did it actually rebuild?" is never a
+mystery. rackabel uses a 64-bit FNV-1a of the bundle bytes rendered as 12 hex chars.
+Change-detection is the only requirement (not integrity/security), so this avoids
+pulling in a SHA crate. If a cryptographic digest is ever needed for distribution, it
+can be added without changing the build-hash contract.
+
+---
+
 ## Deferred (to be recorded by the owning command branch when it lands)
 
 These are flagged in the specs as likely deviations but belong to a command body the

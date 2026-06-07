@@ -1,0 +1,5 @@
+# A minimal Live Extension fixture used by the build tests. It deliberately omits
+# author/version/entry/minimum_api_version so the build exercises inference, and
+# declares no native deps so the bundle has no externals.
+[extension]
+name = "Clip Renamer"

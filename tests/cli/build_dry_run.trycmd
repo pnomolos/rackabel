@@ -1,0 +1,19 @@
+```
+$ rackabel build --dry-run
+planned build steps (nothing was changed):
+  - bundle [..]src/extension.ts -> [..]dist/extension.js (format=cjs, platform=node, sourcemap)
+  - write [..]manifest.json
+  - validate: node --check, bundle-size sanity
+
+```
+
+```
+$ rackabel build --release --clean --dry-run
+planned build steps (nothing was changed):
+  1. clean [..]dist
+  - typecheck: tsc --noEmit
+  - bundle [..]src/extension.ts -> [..]dist/extension.js (format=cjs, platform=node, minify, no sourcemap)
+  - write [..]manifest.json
+  - validate: node --check, bundle-size sanity
+
+```
