@@ -14,6 +14,7 @@ use crate::error::{CmdResult, ErrorCode, RkError};
 use crate::plugin::lock::LockFile;
 use crate::plugin::resolve::{self, Resolution};
 use crate::plugin::{env_contract, warn_state};
+use crate::ui;
 
 /// Run an external `rackabel-<foo>` subcommand. `argv[0]` is the `<foo>` token; the rest
 /// are forwarded verbatim. The process exit code is propagated by exiting with it (so a
@@ -38,14 +39,36 @@ pub fn run(argv: &[OsString], ctx: &Ctx) -> CmdResult<()> {
             ));
         }
         Resolution::Managed { path, also_on_path } => {
-            if *also_on_path {
-                warn_state::warn_both_locations_once(ctx, &name);
+            // Dispatch gating (§5.4): a DISABLED managed plugin is skipped in the bin
+            // search with a one-line note. If the same name is ALSO on $PATH, fall back to
+            // that unmanaged copy; otherwise treat it as not-installed for the bare name
+            // (the escape hatch `plugin run` still reaches it). PLUGIN-MGMT-owned hook.
+            if crate::plugin::store::is_managed_disabled(ctx, &name) {
+                note_managed_disabled(&name, ctx);
+                if let Some(p) = path_lookup_path(also_on_path, &name, ctx) {
+                    p
+                } else {
+                    return Err(disabled_managed(&name));
+                }
+            } else {
+                if *also_on_path {
+                    // The one-time both-locations nudge (§5.1) — persisted per name per
+                    // RACKABEL_HOME, suppressed (and not recorded) under --json/quiet.
+                    warn_state::warn_both_locations_once(ctx, &name);
+                }
+                path.clone()
             }
-            path.clone()
         }
         Resolution::Path { path } => path.clone(),
         Resolution::NotFound => return Err(unknown_command(&name, ctx)),
     };
+
+    // Tamper check (§5.7): before running a MANAGED (lock-recorded) plugin, verify its
+    // on-disk bytes still match the `plugins.lock` sha256 pin. A modified installed file is
+    // `RK4007` (validation, exit 4) — pins protect against tampering and silent updates.
+    // An unmanaged `$PATH` plugin has no pin and is run as-is (the user owns it).
+    // PLUGIN-MGMT-owned hook.
+    crate::plugin::store::verify_managed(ctx, &name)?;
 
     // Build the §5.2 env contract and overlay it on the inherited environment.
     let project = env_contract::resolve_project_root(ctx);
@@ -155,6 +178,48 @@ fn edit_distance(a: &str, b: &str) -> usize {
         std::mem::swap(&mut prev, &mut cur);
     }
     prev[b.len()]
+}
+
+/// When a managed copy is disabled but the same name is ALSO on `$PATH`, re-resolve the
+/// PATH copy (the managed one is skipped). Returns `None` when there is no PATH fallback.
+fn path_lookup_path(also_on_path: &bool, name: &str, ctx: &Ctx) -> Option<std::path::PathBuf> {
+    if !*also_on_path {
+        return None;
+    }
+    let found = resolve::path_lookup_real(&crate::plugin::exe_basename(name));
+    if found.is_some() && ctx.echo_on() {
+        ui::frame::ewarn(
+            &format!("using the $PATH `rackabel-{name}` (the managed copy is disabled)"),
+            ctx,
+        );
+    }
+    found
+}
+
+/// The one-line note that a managed copy is skipped because it is disabled (§5.4).
+fn note_managed_disabled(name: &str, ctx: &Ctx) {
+    if ctx.echo_on() {
+        ui::frame::ewarn(
+            &format!(
+                "managed plugin `{name}` is disabled (skipped); enable it with `rackabel \
+                 plugin enable {name}`, or run it anyway with `rackabel plugin run {name}`"
+            ),
+            ctx,
+        );
+    }
+}
+
+/// The `RK0401` frame for a bare-name dispatch to a DISABLED managed plugin with no $PATH
+/// fallback: the plugin exists but is intentionally skipped (§5.4).
+fn disabled_managed(name: &str) -> RkError {
+    RkError::of(
+        ErrorCode::PluginNotFound,
+        format!("managed plugin `{name}` is installed but disabled"),
+        format!(
+            "enable it with `rackabel plugin enable {name}`, or invoke it anyway with \
+             `rackabel plugin run {name}`"
+        ),
+    )
 }
 
 #[cfg(test)]

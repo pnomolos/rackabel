@@ -16,12 +16,15 @@
 //! the GitHub query); the foundation lands the models, the parsers, the seams, and
 //! compiling stubs that return a clear framed error so the whole tree builds.
 
+pub mod collision;
 pub mod env_contract;
 pub mod git;
 pub mod lock;
+pub mod manifest;
 pub mod resolve;
 pub mod sha256;
 pub mod source;
+pub mod store;
 pub mod template;
 pub mod warn_state;
 

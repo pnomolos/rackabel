@@ -75,16 +75,31 @@ error: no plugin named `nope` is installed or on PATH [RK0401]
 
 ```
 
-`plugin install` classifies the source (the frozen, tested part) and then frames the
-not-yet-implemented boundary — the install/pin/lock body lands with the 0.4
-plugin-management work.
+`plugin install OWNER/REPO` is remote third-party code (§5.7): it announces what it will
+fetch/run, then requires confirmation. With no interactive terminal (the trycmd harness runs
+non-TTY) it is a hard refusal (exit 3, RK0403) — nothing is fetched, so this stays hermetic.
 
 ```
 $ RACKABEL_HOME=rk-home-plugin rackabel plugin install owner/repo
 ? 3
-error: plugin install for `owner/repo` is not implemented yet [RK0401]
-  help: plugin install (release-asset/clone+run, sideload, sha256/commit pinning) lands with the 0.4 plugin-management work; the model + seams are in place
-(run `rackabel explain RK0401` for details)
+[!] about to install plugin `repo`[..]
+error: installing `owner/repo` runs unreviewed third-party code and was not confirmed [RK0403]
+  help: no interactive terminal to confirm in — pass --yes to consent in a script
+(run `rackabel explain RK0403` for details)
+
+```
+
+`plugin search` against the real GitHub API is exercised manually; pointed at an unreachable
+API base (the `RACKABEL_GITHUB_API` seam at a closed port) it is the clean `RK0404` no-network
+frame (exit 3) — never a panic, never a stack trace. This keeps the transcript hermetic.
+
+```
+$ RACKABEL_HOME=rk-home-plugin RACKABEL_GITHUB_API=http://127.0.0.1:1 rackabel plugin search midi
+? 3
+error: could not reach the network to search GitHub [RK0404]
+  --> http://127.0.0.1:1/search/repositories?q=topic:rackabel-plugin+midi&sort=stars&order=desc
+  help: check your connection and retry, or sideload a local path/tarball instead
+(run `rackabel explain RK0404` for details)
 
 ```
 

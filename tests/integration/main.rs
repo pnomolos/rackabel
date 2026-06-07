@@ -33,6 +33,10 @@ mod pack;
 // FOUNDATION). Unix-only (the fixture plugins are shell scripts with exec bits).
 #[cfg(unix)]
 mod plugin;
+// `plugin install`/`list`/`enable`/`disable`/`search` + plugins.lock (milestone 0.4,
+// PLUGIN-MGMT). Unix-only (fixture plugins are shell scripts; symlink + exec-bit asserts).
+#[cfg(unix)]
+mod plugin_mgmt;
 mod validate;
 
 use assert_cmd::prelude::*;
