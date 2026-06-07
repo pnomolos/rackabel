@@ -1,0 +1,15 @@
+The no-Live doctor screen stays friendly on the most demoralizing first run (§6.2):
+just the one fixable failure, its navigational help, and a reassuring summary. The
+inline `ABLETON_APP` points at a path that does not exist, so detection finds no Live
+and every dependent check is blocked — making the transcript deterministic on any
+machine (a real Live in /Applications is bypassed by the override).
+
+```
+$ ABLETON_APP=/rackabel-test/no-such-Ableton-Live.app RACKABEL_DOCTOR_LIVE_RUNNING=0 RACKABEL_DOCTOR_BARE_HOST=0 rackabel doctor --no-input
+? 3
+[✗] No Ableton Live install found
+    help: install Live Suite 12.4.5+ and turn on the Extensions beta
+          (Live → Settings → … → Beta), then rerun `rackabel doctor`.
+0/6 checks passed — 1 thing to fix (the remaining checks can't run until Live is found)
+
+```
