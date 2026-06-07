@@ -56,6 +56,7 @@ fn short_title(code: ErrorCode) -> &'static str {
         ErrorCode::PackFailed => "Pack failed",
         ErrorCode::ReloadActivateFailed => "An extension threw in activate() on reload",
         ErrorCode::HostLaunchFailed => "The Extension Host failed to launch",
+        ErrorCode::TestFailed => "One or more `dev test` targets had failing tests",
         ErrorCode::ManifestIncomplete => "Manifest is incomplete",
         ErrorCode::ApiVersionTooHigh => "minimumApiVersion exceeds the host's apiVersion",
         ErrorCode::VersionNotBumped => "Version not bumped vs the last packed version",
@@ -427,6 +428,27 @@ fn long_form(code: ErrorCode) -> &'static str {
                - override the paths explicitly with --eh-node / --eh-mod (or the\n\
                  ABLETON_EH_NODE / ABLETON_EH_MOD environment variables) if detection\n\
                  picked the wrong ones."
+        }
+        ErrorCode::TestFailed => {
+            "`rackabel dev test` ran the headless test suite and at least one target\n\
+             had a failing test (or its `activate()` smoke threw).\n\
+             \n\
+             `dev test` is the no-Live CI entry point (§3.8): per target it builds the\n\
+             extension, then runs the project's own vitest/TestHarness tests, any\n\
+             project-defined `*:headless` script, or — if neither exists — a best-effort\n\
+             generic `activate()` smoke (reported as `skipped_no_harness`, NOT full CI\n\
+             coverage). A failing target is a build/runtime failure (exit 1): your code\n\
+             or your test, not the machine. It never needs Live, Developer Mode, or a\n\
+             running dev host, and it never prompts.\n\
+             \n\
+             To fix:\n\
+               - read the failing target(s) above; rerun with --raw to see the runner's\n\
+                 full reporter output, or `--json` for a machine-readable summary\n\
+                 ({ targets: [...], passed, failed }).\n\
+               - run a single target with `rackabel dev test <name>` and forward runner\n\
+                 flags verbatim after `--` (e.g. `dev test <name> -- -t \"my case\"`).\n\
+               - targets flagged `skipped_no_harness` have no headless harness — add a\n\
+                 vitest test (or a `*:headless` script) so they are really CI-covered."
         }
         ErrorCode::ManifestIncomplete => {
             "A required manifest field is missing or empty after inference.\n\

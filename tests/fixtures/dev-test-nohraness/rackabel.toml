@@ -1,0 +1,5 @@
+# A Live Extension fixture with NO test harness (no vitest `test`, no `*:headless`
+# script — no package.json at all), exercising the §3.8 third-precedence path: the
+# best-effort generic activate() smoke, reported as skipped_no_harness.
+[extension]
+name = "No Harness Fixture"

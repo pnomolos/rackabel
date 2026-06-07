@@ -42,7 +42,9 @@ fn dev_status_without_daemon_is_environment_error() {
 }
 
 /// A `dev` verb token wins over a same-named extension: `dev test` is the subcommand
-/// (exit 1, the test runner's build/runtime class), NOT the bare loop.
+/// (the no-Live test runner), NOT the bare loop. With nothing registered and no project
+/// in the (temp) cwd it has nothing to test → `RK0001` (exit 3) — crucially NOT the
+/// bare loop's `RK0307`, which proves the verb routed to the test runner.
 #[test]
 fn dev_verb_wins_over_name() {
     let home = TempDir::new().unwrap();
@@ -50,8 +52,9 @@ fn dev_verb_wins_over_name() {
         .args(["dev", "test", "--no-input"])
         .assert()
         .failure()
-        .code(1)
-        .stderr(predicate::str::contains("RK1306"));
+        .code(3)
+        .stderr(predicate::str::contains("RK0001"))
+        .stderr(predicate::str::contains("RK0307").not());
 }
 
 /// `--only <token>` ALWAYS routes through the name matcher (the bare loop), never the

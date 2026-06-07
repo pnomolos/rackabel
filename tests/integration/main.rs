@@ -12,6 +12,9 @@ mod dev;
 // The hermetic daemon-lifecycle tests (DAEMON-CORE): real binary + FakeHost seam.
 #[cfg(unix)]
 mod dev_daemon;
+// The no-Live `dev test` (§3.8) tests (DEV-TEST): build + stub-runner harness.
+#[cfg(unix)]
+mod dev_test;
 mod doctor;
 mod new;
 mod pack;

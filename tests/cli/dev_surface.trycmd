@@ -31,15 +31,18 @@ error: `rackabel dev reload` is not implemented yet [RK0309]
 ```
 
 A bare token that is NOT a verb routes to the bare loop (the registry name matcher),
-not the verb table — `rackabel dev test` is the subcommand (exit 1, RK1306), while
-`rackabel dev --only test` targets the extension named `test` (the bare loop, exit 3).
+not the verb table — `rackabel dev test` is the subcommand, while `rackabel dev --only
+test` targets the extension named `test` (the bare loop, exit 3). With nothing
+registered and no project in the cwd, `dev test` has nothing to test → `RK0001` (it
+routes to the test runner, NOT the bare loop's `RK0307`).
 
 ```
 $ rackabel dev test --no-input
-? 1
-error: `rackabel dev test` is not implemented yet [RK1306]
-  help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
-(run `rackabel explain RK1306` for details)
+? 3
+error: no manifest found [RK0001]
+  --> looked for rackabel.toml in [..] and its parents
+  help: run `rackabel new` to scaffold one, or cd into a project directory
+(run `rackabel explain RK0001` for details)
 
 ```
 
