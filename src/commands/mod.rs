@@ -1,5 +1,9 @@
 pub mod build;
+pub mod deploy;
 pub mod doctor;
+pub mod explain;
 pub mod install;
 pub mod new;
+pub mod pack;
+pub mod validate;
 pub mod watch;

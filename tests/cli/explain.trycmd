@@ -1,0 +1,19 @@
+```
+$ rackabel explain RK0001
+RK0001 — No rackabel.toml found
+
+rackabel looks for a rackabel.toml in the current directory and its
+parents. None was found. Run `rackabel new` to scaffold a project, or
+cd into an existing project directory.
+
+```
+
+```
+$ rackabel explain rk0303
+RK0303 — No Ableton Live install found
+
+No Ableton Live install was found (or all installs are below 12.4.5).
+Install Live Suite 12.4.5+ and enable the Extensions beta, then rerun
+`rackabel doctor`.
+
+```

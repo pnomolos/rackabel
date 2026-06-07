@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 /// Ableton's User Library, where installed M4L devices live.
 pub fn user_library() -> Option<PathBuf> {
-    let home = std::env::home_dir()?;
+    // Use the `home` crate instead of the deprecation-prone `std::env::home_dir`;
+    // the resolved path is identical (DESIGN §6 / SPEC C §6 note).
+    let home = home::home_dir()?;
     if cfg!(target_os = "macos") {
         Some(home.join("Music/Ableton/User Library"))
     } else if cfg!(target_os = "windows") {
