@@ -1,0 +1,8 @@
+# Fully specified so `pack` echoes no inference notes (deterministic transcript). The
+# include guard fires before any build, so this transcript needs no node.
+[extension]
+name = "Clip Renamer"
+author = "Jane Doe"
+version = "0.1.0"
+entry = "src/extension.ts"
+minimum_api_version = "1.0.0"

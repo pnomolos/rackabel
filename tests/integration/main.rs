@@ -7,6 +7,7 @@ mod build;
 mod common;
 mod deploy;
 mod doctor;
+mod pack;
 mod validate;
 
 use assert_cmd::prelude::*;

@@ -8,6 +8,7 @@ pub mod live;
 pub mod native_dep;
 pub mod node;
 pub mod official_cli;
+pub mod packer;
 pub mod proc;
 pub mod toolkit;
 pub mod user_library;

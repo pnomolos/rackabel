@@ -1,0 +1,9 @@
+# A fully-specified pure-JS Live Extension fixture for the pack tests. All fields are
+# explicit so `pack`'s ship-validation gate passes deterministically (no reliance on
+# git config in the test environment) and transcripts emit no inference notes.
+[extension]
+name = "Clip Renamer"
+author = "Jane Doe"
+version = "0.1.0"
+entry = "src/extension.ts"
+minimum_api_version = "1.0.0"
