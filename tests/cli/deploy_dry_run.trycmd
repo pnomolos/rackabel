@@ -1,0 +1,20 @@
+```
+$ rackabel deploy --dry-run --user-library lib
+User Library: lib ([..])
+planned deploy (nothing was changed):
+  - slug: [..]
+  - target: [..]Extensions[..]
+  - build if stale, then copy:
+      [..]manifest.json -> [..]Extensions[..]manifest.json
+      [..]dist/extension.js -> [..]Extensions[..]dist/extension.js
+
+```
+
+Undo when nothing is deployed is a clean no-op, not an error:
+
+```
+$ rackabel deploy --undo --user-library lib
+User Library: lib ([..])
+[✓] nothing to undo — [..] is not deployed
+
+```

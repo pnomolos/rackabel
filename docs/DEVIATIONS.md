@@ -217,21 +217,80 @@ so there's no compiled binary" footgun (SPEC B §3) without false-passing.
 
 ---
 
+## 0.2 deploy
+
+### D-11. `native_dep::fix` IS implemented (no slip) — but depends on pnpm on PATH (DESIGN §3.7 / SPEC C §3.8)
+
+The foundation shipped `native_dep::fix` as an `RK0304` stub. The deploy branch
+replaced it with the real behavior: locate `pnpm` on PATH, run `pnpm approve-builds`
+then `pnpm rebuild <dep…>` under the hood, then re-audit that the `.node` binaries now
+exist (SPEC B §3). The raw `pnpm` commands are shown only under `--verbose`; the
+Persona-A-facing string is always plain English (DESIGN §3.7) — a missing `.node` says
+"this extension uses a compiled component that needs to be built — run `rackabel
+deploy --fix`", never a bare `pnpm` command. **Deviation:** the spec implies rackabel
+"owns the package manager"; in 0.2 it only *drives* pnpm and requires pnpm to be on
+PATH (the official scaffold sets projects up with pnpm). If pnpm is absent, `--fix`
+fails with a plain-English environment error pointing the developer at installing pnpm
+— still no raw module/tool-not-found. A managed/bundled pnpm is a later milestone.
+
+### D-12. `extra_dist_files` ARE copied on deploy (unifying deploy with pack) (SPEC B §3)
+
+Resolved the deferred item: the Arclight `deploy-extension.js` helper copies only
+`manifest.json` + `dist/extension.js` (lidal overrides this for `editor-client.js`);
+rackabel's deploy copies `[extension.build].extra_dist_files` into `<dest>/dist/` too,
+matching pack and lidal's intent so the deployed and packed dist trees are identical. A
+declared extra dist file that is missing on disk is a warn-and-skip (parity with
+`pack-extension.js`), not a hard failure.
+
+### D-13. build-if-stale uses an mtime check, not the recorded build hash (DESIGN §2 deploy)
+
+DESIGN §2 says deploy runs "build (if stale)". The build owner records a content hash
+in `.rackabel/state.toml`, but that hash function is private to `services::esbuild`.
+Rather than couple deploy to another module's internal hashing, deploy decides
+staleness by comparing the built bundle's mtime against the newest mtime under `src/`
+and `rackabel.toml` (which feeds the generated manifest). A freshly-built bundle is
+always fresh; a missing bundle/manifest, or any newer source, triggers a rebuild. This
+is the classic, self-contained build-if-stale check and never ships a stale bundle (the
+deploy-before-reload trap, DESIGN §3). Note this is a *stale* check that prefers
+rebuilding; it does not detect a manual edit of the bundle itself (the SDK never wants
+that anyway, since the bundle is generated).
+
+### D-14. `--undo` safety contract: refuse a folder without a `manifest.json` (DESIGN §2 deploy)
+
+`--undo` removes `<UserLibrary>/Extensions/<slug>`. To avoid ever `rm -rf`-ing an
+unrelated user folder that happens to share the slug, deploy refuses (framed error,
+exit 1) when the target exists but does not contain a `manifest.json` — the always-
+written member of a rackabel deploy. A not-deployed target is a clean no-op success
+(the desired end state already holds), not an error. The spec describes undo as "the
+discoverable cleanup path"; this adds the safety gate the spec implies but does not
+spell out.
+
+### D-15. `deploy --release` calls `validate::run` directly (DESIGN §2 deploy)
+
+`deploy --release` runs `validate` first and fails the deploy on any validation error,
+per DESIGN §2. It does this by calling `crate::commands::validate::run(...)` so it
+automatically picks up the real validator once the validate+explain owner lands it.
+**Integration note:** while `commands::validate::run` is still the foundation stub
+(which returns a build/runtime "not implemented" error), `deploy --release` will
+surface that stub error rather than a real validation pass. No behavior is dropped —
+the wiring is correct and resolves itself when validate lands; the integrator should
+verify the exit-4 path once validate is real. (`--release` is not exercised in the
+deploy tests for exactly this reason.)
+
+---
+
 ## Deferred (to be recorded by the owning command branch when it lands)
 
 These are flagged in the specs as likely deviations but belong to a command body the
 foundation only stubs; the owning branch records the final decision here.
 
-- **`native_dep::fix` full pnpm automation** (DESIGN §3.7 / SPEC C §3.8). The
-  foundation ships `fix` as an `RK0304` stub with a plain-English help line. If full
-  `pnpm approve-builds`+`rebuild` automation slips past 0.2, the deploy-owner records
-  it here.
+- **`native_dep::fix` full pnpm automation** (DESIGN §3.7 / SPEC C §3.8). Resolved by
+  the deploy branch — see D-11 above.
 - **pack dual-format `.ablx` vs `.zip`** (DESIGN §4.7 / SPEC B §4). The pack-owner
   records the reconciliation between the official `<name>-<version>.ablx` and the
   Arclight `<slug>-v<version>[-os-arch].zip` layouts, and the dropped/ generalized
   lidal `lidal.openEditor` sentinel.
 - **Developer Mode detection is behavioral/unverified** (DESIGN §9.2 / SPEC B §6).
-  RESOLVED by the doctor branch — see D-11 above.
-- **`extra_dist_files` copied on deploy** (SPEC B §3). The shared `deploy-extension.js`
-  helper does not copy extra dist files; rackabel unifies this with pack. The
-  deploy-owner records the final behavior.
+  RESOLVED by the doctor branch — see the doctor section above.
+- **`extra_dist_files` copied on deploy** (SPEC B §3). Resolved by the deploy branch —
+  see the deploy section above.
