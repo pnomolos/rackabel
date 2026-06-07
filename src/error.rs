@@ -48,6 +48,28 @@ pub enum ErrorCode {
     /// old `RK0309 NoDaemon` (exit 3, "start the dev host") was the wrong class AND the
     /// wrong remedy; this is a usage error (exit 2) whose remedy points at `dev list`.
     NoSuchExtension,
+    /// `rackabel <foo>` (or `plugin which <name>`) named a token that a built-in
+    /// subcommand reserves, but a `rackabel-<name>` exists on PATH/in the managed bin —
+    /// the plugin is *shadowed* by the built-in (§5.6). Informational: the remedy is the
+    /// `plugin run <name>` escape hatch. A usage-class (exit 2) outcome, not an error in
+    /// the failure sense — it tells the user the name resolves to the built-in.
+    PluginShadowedByBuiltin,
+    // -- extensibility / plugins & templates environment (exit 3) --
+    /// `rackabel plugin <verb>` (`which`/`run`/`enable`/`disable`) named a plugin that
+    /// is not installed and not on PATH (§5.4/§5.6). An environment/setup problem (the
+    /// plugin isn't present), whose remedy points at `plugin list`/`plugin install`.
+    PluginNotFound,
+    /// A `new --template gh:…`/`@scope/…`/`<path>` ref could not be resolved (the repo/
+    /// ref doesn't exist, or the local path has no `rackabel-template.toml`, §5.5).
+    TemplateNotFound,
+    /// A remote template/plugin install required confirmation and the user declined (or
+    /// `--no-input` forbade the prompt) before any fetch ran (§5.5/§5.7). Nothing was
+    /// fetched or built; the remedy is `--yes` to consent in a script.
+    TemplateFetchDeclined,
+    /// A network operation a feature needs (template fetch, `plugin install`/`search`)
+    /// could not reach the network or hit a rate limit (§5.4). An environment problem,
+    /// distinct from a not-found — retry or sideload.
+    NoNetwork,
     // -- toolkit (exit 3) --
     /// Extensions toolkit (SDK/CLI tarball) not found.
     ToolkitNotFound,
@@ -111,6 +133,15 @@ pub enum ErrorCode {
     IdentifierDrift,
     /// `dev reload --strict` and an extension was pre-filtered as host-incompatible.
     SkippedIncompatible,
+    /// A plugin's installed code does not match its `plugins.lock` pin (commit/sha256)
+    /// at install/verify time (§5.4). A validation failure (exit 4) so CI can gate on it
+    /// deterministically; `--force` past a pin announces it. Pinning protects against
+    /// tampering and silent updates, not malicious-but-pinned code (§5.7).
+    PinMismatch,
+    /// `new --update` produced merge conflicts (copier-style 3-way merge, §5.5).
+    /// Conflict markers were written and a `help:` summary lists the files; the user
+    /// resolves them. A validation failure (exit 4) — the tree needs a human decision.
+    UpdateConflicts,
 }
 
 impl ErrorCode {
@@ -122,6 +153,11 @@ impl ErrorCode {
             Self::ManifestParse => "RK0003",
             Self::UsageError => "RK0101",
             Self::NoSuchExtension => "RK0102",
+            Self::PluginShadowedByBuiltin => "RK0103",
+            Self::PluginNotFound => "RK0401",
+            Self::TemplateNotFound => "RK0402",
+            Self::TemplateFetchDeclined => "RK0403",
+            Self::NoNetwork => "RK0404",
             Self::ToolkitNotFound => "RK0201",
             Self::ToolkitVersionMismatch => "RK0202",
             Self::UserLibraryAmbiguous => "RK0301",
@@ -150,6 +186,8 @@ impl ErrorCode {
             Self::IncludeInvalid => "RK4004",
             Self::IdentifierDrift => "RK4005",
             Self::SkippedIncompatible => "RK4006",
+            Self::PinMismatch => "RK4007",
+            Self::UpdateConflicts => "RK4008",
         }
     }
 
@@ -162,10 +200,16 @@ impl ErrorCode {
     /// The exit class this code maps to. Keeps the frame and the exit code in sync.
     pub fn class(self) -> ExitClass {
         match self {
-            Self::UsageError | Self::NoSuchExtension => ExitClass::Usage,
+            Self::UsageError | Self::NoSuchExtension | Self::PluginShadowedByBuiltin => {
+                ExitClass::Usage
+            }
             Self::NoManifest
             | Self::AmbiguousKind
             | Self::ManifestParse
+            | Self::PluginNotFound
+            | Self::TemplateNotFound
+            | Self::TemplateFetchDeclined
+            | Self::NoNetwork
             | Self::ToolkitNotFound
             | Self::ToolkitVersionMismatch
             | Self::UserLibraryAmbiguous
@@ -196,7 +240,9 @@ impl ErrorCode {
             | Self::VersionNotBumped
             | Self::IncludeInvalid
             | Self::IdentifierDrift
-            | Self::SkippedIncompatible => ExitClass::Validation,
+            | Self::SkippedIncompatible
+            | Self::PinMismatch
+            | Self::UpdateConflicts => ExitClass::Validation,
         }
     }
 
@@ -207,6 +253,11 @@ impl ErrorCode {
         Self::ManifestParse,
         Self::UsageError,
         Self::NoSuchExtension,
+        Self::PluginShadowedByBuiltin,
+        Self::PluginNotFound,
+        Self::TemplateNotFound,
+        Self::TemplateFetchDeclined,
+        Self::NoNetwork,
         Self::ToolkitNotFound,
         Self::ToolkitVersionMismatch,
         Self::UserLibraryAmbiguous,
@@ -235,6 +286,8 @@ impl ErrorCode {
         Self::IncludeInvalid,
         Self::IdentifierDrift,
         Self::SkippedIncompatible,
+        Self::PinMismatch,
+        Self::UpdateConflicts,
     ];
 }
 
@@ -371,6 +424,35 @@ mod tests {
         assert_eq!(ErrorCode::ToolkitNotFound.class(), ExitClass::Environment);
         assert_eq!(ErrorCode::BuildFailed.class(), ExitClass::BuildRuntime);
         assert_eq!(ErrorCode::ManifestIncomplete.class(), ExitClass::Validation);
+    }
+
+    #[test]
+    fn extensibility_codes_are_classed_per_design() {
+        // §5.4/§5.6 plugin & template environment codes (exit 3).
+        assert_eq!(ErrorCode::PluginNotFound.class(), ExitClass::Environment);
+        assert_eq!(ErrorCode::TemplateNotFound.class(), ExitClass::Environment);
+        assert_eq!(
+            ErrorCode::TemplateFetchDeclined.class(),
+            ExitClass::Environment
+        );
+        assert_eq!(ErrorCode::NoNetwork.class(), ExitClass::Environment);
+        // shadow-by-builtin is informational/usage (exit 2): remedy is `plugin run`.
+        assert_eq!(ErrorCode::PluginShadowedByBuiltin.class(), ExitClass::Usage);
+        // pin mismatch + update conflicts are validation (exit 4) so CI gates cleanly.
+        assert_eq!(ErrorCode::PinMismatch.class(), ExitClass::Validation);
+        assert_eq!(ErrorCode::UpdateConflicts.class(), ExitClass::Validation);
+    }
+
+    #[test]
+    fn all_codes_have_unique_strings() {
+        let mut seen = std::collections::HashSet::new();
+        for &code in ErrorCode::ALL {
+            assert!(
+                seen.insert(code.as_str()),
+                "duplicate code {}",
+                code.as_str()
+            );
+        }
     }
 
     #[test]

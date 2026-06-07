@@ -1,0 +1,74 @@
+The `plugin` group's read/parse surface holds without any plugins installed
+(FOUNDATION guarantees, DESIGN §5.1/§5.4/§5.6). These are deterministic on any machine:
+they never touch the network or the dev host. As the plugin-management agent fills the
+install/enable/disable/search bodies, the "not implemented yet" cases become the real
+transcripts; the EXIT CODES, the built-in precedence, and the env-contract routing
+asserted here are the frozen contract.
+
+`plugin list` with nothing installed is a friendly empty state (exit 0), not an error.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel plugin list
+no plugins installed
+  install one with `rackabel plugin install OWNER/REPO`,
+  or find one with `rackabel plugin search <term>`
+
+```
+
+`plugin which <builtin>` reports the name resolves to the built-in (§5.6). With no
+shadowed plugin present it is purely informational and exits 0.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel plugin which dev
+dev: built-in subcommand
+
+```
+
+`plugin which <unknown>` is an environment error (exit 3, RK0401) — no built-in and no
+plugin by that name.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel plugin which nope
+? 3
+error: no plugin named `nope` is installed or on PATH [RK0401]
+  help: run `rackabel plugin list`, or `rackabel plugin install OWNER/REPO`
+(run `rackabel explain RK0401` for details)
+
+```
+
+An UNKNOWN top-level token routes to the PATH-subcommand catch-all (§5.1); with no
+matching `rackabel-<foo>` it is RK0401 — never a panic, never a silent no-op. Built-ins
+always win, so this only ever fires for a non-reserved token.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel frobnicate --wild
+? 3
+error: unknown command `frobnicate` (no built-in and no plugin by that name) [RK0401]
+  help: run `rackabel --help` for built-ins, `rackabel plugin list` for installed plugins, or `rackabel plugin install OWNER/REPO` to add one
+(run `rackabel explain RK0401` for details)
+
+```
+
+`plugin install` classifies the source (the frozen, tested part) and then frames the
+not-yet-implemented boundary — the install/pin/lock body lands with the 0.4
+plugin-management work.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel plugin install owner/repo
+? 3
+error: plugin install for `owner/repo` is not implemented yet [RK0401]
+  help: plugin install (release-asset/clone+run, sideload, sha256/commit pinning) lands with the 0.4 plugin-management work; the model + seams are in place
+(run `rackabel explain RK0401` for details)
+
+```
+
+A malformed install source is a usage error (exit 2), caught before any work.
+
+```
+$ RACKABEL_HOME=rk-home-plugin rackabel plugin install ""
+? 2
+error: `` is not a valid install source [RK0101]
+  help: use OWNER/REPO, a local path, or a .tgz tarball
+(run `rackabel explain RK0101` for details)
+
+```

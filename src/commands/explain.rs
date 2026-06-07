@@ -36,6 +36,11 @@ fn short_title(code: ErrorCode) -> &'static str {
         ErrorCode::ManifestParse => "rackabel.toml could not be parsed",
         ErrorCode::UsageError => "Command invoked incorrectly",
         ErrorCode::NoSuchExtension => "No registered extension by that name or path",
+        ErrorCode::PluginShadowedByBuiltin => "A built-in subcommand shadows the plugin name",
+        ErrorCode::PluginNotFound => "No plugin by that name is installed or on PATH",
+        ErrorCode::TemplateNotFound => "The template ref could not be resolved",
+        ErrorCode::TemplateFetchDeclined => "A remote fetch was declined (no confirmation)",
+        ErrorCode::NoNetwork => "Could not reach the network (or hit a rate limit)",
         ErrorCode::ToolkitNotFound => "Extensions toolkit (SDK/CLI) not found",
         ErrorCode::ToolkitVersionMismatch => "Toolkit version mismatch vs [toolchain].sdk",
         ErrorCode::UserLibraryAmbiguous => "Multiple User Libraries; cannot pick under --no-input",
@@ -66,6 +71,8 @@ fn short_title(code: ErrorCode) -> &'static str {
         ErrorCode::SkippedIncompatible => {
             "An extension was skipped as host-incompatible (--strict)"
         }
+        ErrorCode::PinMismatch => "Installed plugin code does not match its lockfile pin",
+        ErrorCode::UpdateConflicts => "A template update produced merge conflicts",
     }
 }
 
@@ -102,6 +109,80 @@ fn long_form(code: ErrorCode) -> &'static str {
                - run `rackabel dev list` to see the registered names and paths, then\n\
                  rerun with one of them, or\n\
                - `rackabel dev register <path>` to add the extension first."
+        }
+        ErrorCode::PluginShadowedByBuiltin => {
+            "The name resolves to a BUILT-IN rackabel subcommand, so a third-party\n\
+             `rackabel-<name>` on PATH (or in ~/.rackabel/plugins/bin) is shadowed and\n\
+             never runs as the bare `rackabel <name>`.\n\
+             \n\
+             Built-ins always win the namespace (git/cargo behavior, §5.6): a plugin can\n\
+             never hijack a blessed verb like `dev` or `build`. This is informational —\n\
+             nothing is broken — but the plugin you installed is not reachable by the bare\n\
+             name.\n\
+             \n\
+             To fix:\n\
+               - run the plugin via the escape hatch: `rackabel plugin run <name> …`,\n\
+                 which invokes the executable even when a built-in claims the name, or\n\
+               - rename the plugin so its name does not collide with a built-in.\n\
+             `rackabel plugin which <name>` shows exactly what each name resolves to."
+        }
+        ErrorCode::PluginNotFound => {
+            "No plugin by that name is installed in ~/.rackabel/plugins/bin and none is\n\
+             on your PATH as `rackabel-<name>`.\n\
+             \n\
+             `rackabel <foo>` (and `plugin which/run/enable/disable <foo>`) resolve a\n\
+             non-built-in token to an executable named `rackabel-<foo>`, searching the\n\
+             managed bin first, then $PATH (§5.1). A miss means the plugin isn't present\n\
+             where rackabel looks.\n\
+             \n\
+             To fix:\n\
+               - `rackabel plugin list` to see what's installed, or\n\
+               - `rackabel plugin install OWNER/REPO` (or a local path/tarball to\n\
+                 sideload) to add it, or\n\
+               - `rackabel plugin search <term>` to find one to install."
+        }
+        ErrorCode::TemplateNotFound => {
+            "The `--template` reference could not be resolved.\n\
+             \n\
+             A template is a git repo (or local dir) holding a `rackabel-template.toml`.\n\
+             rackabel accepts `gh:owner/repo[@ref]`, `@scope/name`, or a local path. This\n\
+             error means the repo/ref doesn't exist, or the local path has no\n\
+             `rackabel-template.toml` at its root (so it isn't a template).\n\
+             \n\
+             To fix:\n\
+               - check the owner/repo and ref spelling for a remote template, or\n\
+               - point `--template` at a directory that contains a rackabel-template.toml,\n\
+                 or omit `--template` to use the built-in default (the Persona-A path)."
+        }
+        ErrorCode::TemplateFetchDeclined => {
+            "A remote template or plugin install needs your confirmation before it runs\n\
+             unreviewed third-party code, and that confirmation was not given.\n\
+             \n\
+             `new --template gh:…`/`@scope/…` fetches an arbitrary repo whose build the\n\
+             auto-build then executes; `plugin install OWNER/REPO` runs code on first\n\
+             install. rackabel prints what it will fetch/run and asks before proceeding\n\
+             (§5.5/§5.7). Nothing was fetched or built. Under --no-input the prompt is a\n\
+             hard error rather than a silent default.\n\
+             \n\
+             To fix:\n\
+               - rerun and confirm at the prompt, or\n\
+               - pass `--yes` to consent non-interactively in a script (this is standing\n\
+                 consent to fetch and build the named source), or\n\
+               - use the built-in default template / sideload a local path instead."
+        }
+        ErrorCode::NoNetwork => {
+            "A network operation could not reach the network, or a remote API rate-limited\n\
+             the request.\n\
+             \n\
+             `plugin search` queries the GitHub API; `plugin install OWNER/REPO` and a\n\
+             remote `--template` fetch a repo or release asset. Any of these can fail\n\
+             offline or under a rate limit. This is an environment problem (exit 3),\n\
+             distinct from a not-found.\n\
+             \n\
+             To fix:\n\
+               - check your connection and retry; a rate limit usually clears shortly, or\n\
+               - sideload instead: `plugin install <path|tarball>` and `new --template\n\
+                 <local-path>` never touch the network."
         }
         ErrorCode::NoManifest => {
             "rackabel looks for a rackabel.toml in the current directory and its\n\
@@ -549,6 +630,41 @@ fn long_form(code: ErrorCode) -> &'static str {
                  supports, or upgrade Ableton Live, or\n\
                - drop --strict if a skipped (incompatible) extension is acceptable for\n\
                  this run. `rackabel dev status` lists every skipped extension and why."
+        }
+        ErrorCode::PinMismatch => {
+            "An installed plugin's code does not match the pin recorded for it in\n\
+             ~/.rackabel/plugins.lock.\n\
+             \n\
+             Every `plugin install` pins the resolved code by commit (for a clone) or\n\
+             sha256 (for a downloaded asset/tarball). The lockfile is authoritative: at\n\
+             install/verify time rackabel checks the bytes against the pin so a silently\n\
+             changed upstream, a tampered download, or a stale cache can't slip in\n\
+             (§5.4/§5.7). A mismatch is a validation failure (exit 4) so CI can gate on it.\n\
+             \n\
+             Note: pinning protects against TAMPERING and SILENT UPDATES — it keeps you on\n\
+             the same code you installed, not on safe code.\n\
+             \n\
+             To fix:\n\
+               - re-run the install to fetch the pinned bytes again, or\n\
+               - if you intend to move to new code, pass `--force` to update past the pin\n\
+                 (rackabel announces the change and, for a hook plugin, disables it until\n\
+                 you re-`enable` — new code never runs under old consent, §5.7)."
+        }
+        ErrorCode::UpdateConflicts => {
+            "`rackabel new --update` re-ran the template's 3-way merge and some files\n\
+             could not be merged cleanly.\n\
+             \n\
+             `--update` re-renders the template at its new commit (re-using your saved\n\
+             answers from .rackabel-template), treats your working tree as 'ours', and\n\
+             merges. Files that changed in both the template and your tree get conflict\n\
+             markers; clean files apply silently. Binary/generated files in\n\
+             `[merge].exclude` (e.g. vendored SDK tarballs) are never text-merged (§5.5).\n\
+             \n\
+             To fix:\n\
+               - open the files listed in the `help:` summary, resolve the\n\
+                 <<<<<<< / ======= / >>>>>>> conflict markers, and save. `--update` is a\n\
+                 deliberate developer action and never runs on the Persona-A happy path,\n\
+                 so it never silently clobbers your setup."
         }
     }
 }

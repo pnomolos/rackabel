@@ -29,6 +29,9 @@ which = "7"
 plist = "1"
 home = "0.5"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+# sha256 pinning for `plugin install` (plugins.lock), §5.4. A pure-Rust hash with no
+# system/openssl dependency — the install/verify path hashes downloaded assets/tarballs.
+sha2 = "0.10"
 
 # Daemon mechanics (SPEC D §5): setsid/setpgid (pre_exec), killpg, and kill(pid, None)
 # liveness probing. std exposes none of these portably, so the dev-host daemon/host/ipc

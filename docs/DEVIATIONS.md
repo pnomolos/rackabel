@@ -1030,3 +1030,87 @@ test start (`let _guard = DaemonGuard::new(home, work, live)`), its `Drop` runs 
 (killpg's the group) + a liveness-gated `kill -9` of the pidfile pid. Drop runs on unwind,
 so a panic still reaps the daemon. The liveness gate also removes the
 `kill: <pid>: No such process` transcript noise (minor #6).
+
+---
+
+## 0.4 extensibility (foundation)
+
+### D-80. New RK codes for the §5 extensibility surface (DESIGN §5.4/§5.5/§5.6/§7)
+
+Seven new `ErrorCode`s land for the extensibility milestone, classed by the §7 taxonomy
+(the `RKxxxx` thousands-grouping hint is preserved). Environment (exit 3): `RK0401
+PluginNotFound`, `RK0402 TemplateNotFound`, `RK0403 TemplateFetchDeclined`, `RK0404
+NoNetwork` — a new `RK04xx` block kept distinct from the `RK03xx` host/Live environment
+codes so the cause is legible. Usage (exit 2): `RK0103 PluginShadowedByBuiltin` — the
+shadow is informational (§5.6), its remedy is the `plugin run` escape hatch, so it sits in
+the usage class beside `RK0101`. Validation (exit 4): `RK4007 PinMismatch` and `RK4008
+UpdateConflicts` — a pin mismatch is a deterministic CI gate (§5.4) and an update conflict
+needs a human decision (§5.5), both validation per §7. Every code has a `short_title` +
+long-form `explain` entry; the `code_roundtrips`/`every_code_has_prose`/
+`extensibility_codes_are_classed_per_design` tests pin them.
+
+### D-81. `RACKABEL_PROJECT_DIR`/`RACKABEL_MANIFEST` are UNSET, not empty, outside a project (DESIGN §5.2)
+
+The env-contract builder (`plugin::env_contract::build`) returns a map containing ONLY the
+keys rackabel sets; the caller overlays it on the inherited environment. The two
+project-only vars are simply ABSENT from the map when rackabel runs outside a project
+(`Project::discover` returns `Err`, mapped to `None`), so a plugin presence-tests rather
+than comparing an empty string — the §5.2 "commit unset, not empty" rule. The four
+always-set vars (`RACKABEL`, `RACKABEL_VERSION`, `RACKABEL_PLUGIN_API`,
+`RACKABEL_REGISTRY`) are always present; `RACKABEL` is recomputed from `current_exe` every
+call so a stale inherited value is overwritten (cargo `CARGO`-points-at-wrong-binary bug).
+Pinned by `env_contract::tests` and the `tests/integration/plugin.rs` exec tests.
+
+### D-82. `RESERVED_NAMESPACE` is a single const that INCLUDES the unshipped `publish`/`login` (DESIGN §5.6/§8)
+
+The reserved set lives in one place (`cli::RESERVED_NAMESPACE`) that both clap's
+built-in-precedence (by construction — `allow_external_subcommands` only falls through for
+tokens no built-in claims) and the plugin resolver (`is_reserved`) consult. It deliberately
+reserves `publish` and `login` NOW, before the release that ships them (§8), so the §5.6
+upgrade-time collision detector predates the collision: a `rackabel-publish` plugin is
+already shadowed (and reachable via `plugin run`). `reserved_namespace_is_pinned` +
+`every_builtin_is_reserved` pin the list and assert no built-in escapes it.
+
+### D-83. PATH-subcommand resolution + env contract are FOUNDATION-owned and live (DESIGN §5.1/§5.2/§5.6)
+
+Although §5 install/search/enable/disable bodies are agent-owned stubs, the load-bearing
+RUNTIME surface — `rackabel <foo>` resolve (managed-bin first, then `$PATH`; built-ins
+always win; the both-locations warning), the full §5.2 env contract, arg passthrough, and
+tier-2 exit-code passthrough — is implemented and tested end to end in the foundation
+(`plugin::resolve`, `commands::plugin::external`/`run`/`which`/`list`,
+`tests/integration/plugin.rs`). This is intentional: the three parallel feature agents all
+depend on this surface, so it is frozen + working rather than stubbed. A plugin's non-zero
+exit is propagated via `std::process::exit(code)` (NOT wrapped in an `RkError`) because the
+RkError taxonomy is for rackabel's OWN failures, not a plugin's.
+
+### D-84. plugins.lock RECORDS inert 0.5 hook metadata in 0.4 (DESIGN §5.3/§5.4, milestone note)
+
+Per the milestone note ("the install/list model should already RECORD what 0.5 needs"), the
+`plugins.lock` entry carries `has_plugin_manifest: bool` and an inert `hooks: Vec<String>`,
+plus `enabled: bool` (default false). No `rackabel-plugin.toml` is parsed for execution and
+NO hook runs in 0.4 — the fields are pure metadata so the 0.5 hook surface (enable/disable,
+`plugin migrate`) has a place to read from without a lockfile format change. `enabled`
+defaults false because enabling is the consent gate for hooks (§5.7).
+
+### D-85. Network seams are env vars; no HTTP client lands in the foundation (DESIGN §5.4)
+
+Two test/override seams are env vars resolved in one place: `RACKABEL_TEMPLATE_GIT_BASE`
+(rewrites a `gh:`/`@scope` clone URL to a local `file://` base so template tests use
+fixture repos, never the network) and `RACKABEL_GITHUB_API` (the `plugin search` API base).
+The git wrapper (`plugin::git`) shells the system `git` binary with fixed arg arrays
+(injection-safe for third-party refs) and is tested against LOCAL repos in tempdirs. The
+foundation deliberately adds NO HTTP client dependency: `plugin search`/`install`'s real
+network fetch is the agent's job and is exercised manually later; the foundation freezes the
+seams + the clean `RK0404 NoNetwork` frame. The only new crate is `sha2` (pure-Rust, no
+openssl) for the §5.4 sha256 pin.
+
+### D-86. `--template`/`--update` route to a frozen boundary, never a silent default (DESIGN §5.5)
+
+`new --template <ref>` is classified through the frozen `TemplateSource` and routed to a
+clear "not implemented yet" (`RK0402`) for a remote/local template, or a usage error
+(`RK0101`) for a malformed ref — it never silently falls back to the built-in default
+(replaces the old 0.2 "remote templates arrive in 0.4" usage-error stub, which is now
+inaccurate). `new --update` short-circuits before kind resolution, reads the frozen
+`.rackabel-template` lockfile, and returns "nothing to update" (`RK0402`) when absent or the
+not-implemented merge frame when present. The TEMPLATES agent fills the fetch/render/3-way
+merge; the foundation freezes the source classification + the lockfile models.

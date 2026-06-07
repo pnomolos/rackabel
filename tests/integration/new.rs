@@ -283,10 +283,11 @@ fn device_kind_still_scaffolds_m4l() {
     assert!(proj.join("src/my-device.maxpat").is_file());
 }
 
-/// A remote `--template` ref is a usage error pointing at the 0.4 milestone (it must not
-/// silently fall back to the default).
+/// A remote `--template` ref routes to the frozen template boundary (RK0402, exit 3,
+/// "not implemented yet") — it must NOT silently fall back to the built-in default. The
+/// TEMPLATES agent fills the fetch; the foundation freezes the classification.
 #[test]
-fn remote_template_is_usage_error() {
+fn remote_template_routes_to_boundary() {
     let home = TempDir::new().unwrap();
     let work = TempDir::new().unwrap();
 
@@ -294,11 +295,40 @@ fn remote_template_is_usage_error() {
         .args(["new", "x", "--no-input", "--template", "gh:user/repo"])
         .assert()
         .failure()
+        .code(3)
+        .stderr(predicate::str::contains("remote template"))
+        .stderr(predicate::str::contains("not implemented yet"))
+        .stderr(predicate::str::contains("RK0402"));
+}
+
+/// A malformed `--template` ref is a usage error (exit 2), caught by the frozen classifier.
+#[test]
+fn malformed_template_is_usage_error() {
+    let home = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+
+    rackabel_cmd(home.path(), work.path())
+        .args(["new", "x", "--no-input", "--template", "gh:owner"])
+        .assert()
+        .failure()
         .code(2)
-        .stderr(predicate::str::contains(
-            "remote templates aren't supported yet",
-        ))
-        .stderr(predicate::str::contains("0.4"));
+        .stderr(predicate::str::contains("not a valid template reference"));
+}
+
+/// `new --update` in a directory with no `.rackabel-template` is a clear "nothing to
+/// update" (RK0402, exit 3), never a silent re-scaffold.
+#[test]
+fn update_without_template_lock_is_template_not_found() {
+    let home = TempDir::new().unwrap();
+    let work = TempDir::new().unwrap();
+
+    rackabel_cmd(home.path(), work.path())
+        .args(["new", "--update", "--no-input"])
+        .assert()
+        .failure()
+        .code(3)
+        .stderr(predicate::str::contains("no .rackabel-template"))
+        .stderr(predicate::str::contains("RK0402"));
 }
 
 /// Scaffolding into an existing directory is a usage error (matches the device path +

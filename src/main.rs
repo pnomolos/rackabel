@@ -28,6 +28,10 @@ mod dev;
 mod error;
 mod manifest;
 mod max;
+// rackabel's own plugin model (milestone 0.4, DESIGN §5). Platform-independent (PATH
+// subcommands, the env contract, templates, plugins.lock) — no daemon mechanics — so it
+// is available on every platform, unlike the `#[cfg(unix)]` dev host.
+mod plugin;
 mod services;
 mod ui;
 
@@ -73,6 +77,10 @@ fn dispatch(command: Command, ctx: &Ctx) -> CmdResult<()> {
         Command::Doctor(args) => commands::doctor::run(&args, ctx),
         Command::Explain(args) => commands::explain::run(&args, ctx),
         Command::Dev(args) => dispatch_dev(args, ctx),
+        Command::Plugin(args) => commands::plugin::run(&args, ctx),
+        // A token matching no built-in routes here (§5.1): resolve + exec a
+        // `rackabel-<foo>`, or RK0401 if there is none.
+        Command::External(argv) => commands::plugin::external::run(&argv, ctx),
         Command::Daemon(args) => dispatch_daemon(args, ctx),
     }
 }

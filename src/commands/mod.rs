@@ -9,5 +9,8 @@ pub mod explain;
 pub mod install;
 pub mod new;
 pub mod pack;
+/// rackabel's own third-party plugin group (milestone 0.4, DESIGN §5). Platform-
+/// independent (no daemon mechanics), so — unlike `dev` — it is NOT `#[cfg(unix)]`.
+pub mod plugin;
 pub mod validate;
 pub mod watch;

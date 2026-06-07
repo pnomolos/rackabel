@@ -39,6 +39,14 @@ const DEFAULT_LICENSE: &str = "MIT";
 const DEFAULT_TEMPLATE: &str = "default";
 
 pub fn run(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
+    // `new --update` is a developer action over the CURRENT project (re-run the template's
+    // copier-style 3-way merge, §5.5) — NOT a fresh scaffold — so it short-circuits before
+    // kind resolution. The TEMPLATES agent fills the merge; the foundation routes it to a
+    // clear boundary over the frozen `.rackabel-template` lockfile model.
+    if args.update {
+        return run_update(ctx);
+    }
+
     // Resolve the kind. When unspecified and interactive, the wizard asks; under
     // --no-input (or with --yes) we default to Extension (the musician happy path).
     let kind = resolve_kind(args, ctx)?;
@@ -46,6 +54,34 @@ pub fn run(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
         ProjectKind::Extension => new_extension(args, ctx),
         ProjectKind::Device => new_device(args, ctx),
     }
+}
+
+/// `new --update` (DESIGN §5.5) — STUB over the frozen template-lock model.
+///
+/// OWNED BY THE TEMPLATES AGENT. The foundation reads `.rackabel-template` (the persisted
+/// repo+ref+commit+answers) so the boundary is honest: a project NOT made from a tracked
+/// template gets a clear "nothing to update", and one that was gets the not-implemented
+/// frame (the 3-way merge + `[merge].exclude` + conflict UX land with templates).
+fn run_update(ctx: &Ctx) -> CmdResult<()> {
+    use crate::plugin::template::TemplateLock;
+
+    let lock = TemplateLock::load(&ctx.cwd)?;
+    let Some(lock) = lock else {
+        return Err(RkError::of(
+            ErrorCode::TemplateNotFound,
+            "this project has no .rackabel-template to update from",
+            "`new --update` re-runs the template that scaffolded a project; this directory \
+             was not created from a tracked template (no .rackabel-template present)",
+        )
+        .at(ctx.cwd.display().to_string()));
+    };
+
+    Err(RkError::of(
+        ErrorCode::TemplateNotFound,
+        format!("`new --update` from `{}` is not implemented yet", lock.repo),
+        "the copier-style 3-way merge (re-render at the new commit, [merge].exclude, \
+         conflict markers) lands with the 0.4 template work; the lockfile model is in place",
+    ))
 }
 
 /// Resolve the project kind: explicit `--kind` wins; else prompt (or default Extension
@@ -75,13 +111,14 @@ fn resolve_kind(args: &NewArgs, ctx: &Ctx) -> CmdResult<ProjectKind> {
 // ===========================================================================
 
 fn new_extension(args: &NewArgs, ctx: &Ctx) -> CmdResult<()> {
-    // Remote template refs are a 0.4 milestone — accept the flag, frame a clear
-    // "coming in 0.4" error for gh:/@scope refs. A local path is accepted but not yet
-    // applied (the default template is used); that lands with tier-1 templates in 0.4.
-    if let Some(tref) = &args.template
-        && is_remote_template(tref)
-    {
-        return Err(remote_template_unsupported(tref));
+    // A `--template` ref is classified through the FROZEN `TemplateSource` surface
+    // (§5.5). A REMOTE ref (gh:/@scope) is third-party code that the auto-build would
+    // execute, so it requires the §5.7 confirmation + fetch — owned by the TEMPLATES
+    // agent. The foundation routes it to a clear boundary (and a local-path template is
+    // likewise not yet applied — that lands with tier-1 templates). The built-in default
+    // (no --template) takes the existing happy path below.
+    if let Some(tref) = &args.template {
+        return Err(template_not_implemented(tref));
     }
 
     // 1. The wizard — flag-driven, prompt-filled, --no-input-safe. Defaults are seeded
@@ -432,20 +469,34 @@ fn maybe_auto_build(root: &Path, dir_name: &str, ctx: &Ctx) {
 
 // --- small helpers ----------------------------------------------------------
 
-/// Whether a `--template` ref is a *remote* one (`gh:`/`@scope`) — a 0.4 feature.
-fn is_remote_template(tref: &str) -> bool {
-    tref.starts_with("gh:") || tref.starts_with('@')
-}
-
-/// The framed "remote templates land in 0.4" error.
-fn remote_template_unsupported(tref: &str) -> RkError {
-    RkError::of(
-        ErrorCode::UsageError,
-        "remote templates aren't supported yet",
-        "remote template refs (gh:user/repo, @scope/name) arrive in the 0.4 milestone — \
-         for now omit --template to use the built-in default, or pass a local path",
-    )
-    .at(tref.to_string())
+/// Frame the not-yet-implemented boundary for a `--template` ref (§5.5), classifying it
+/// through the frozen [`crate::plugin::source::TemplateSource`] so the message is precise
+/// (a remote ref vs a local path) and a clearly-malformed ref is a usage error. The
+/// TEMPLATES agent fills the resolution/fetch/render.
+fn template_not_implemented(tref: &str) -> RkError {
+    use crate::plugin::source::TemplateSource;
+    match TemplateSource::parse(tref) {
+        Some(src) if src.is_remote() => RkError::of(
+            ErrorCode::TemplateNotFound,
+            format!("remote template `{}` is not implemented yet", src.display()),
+            "remote template fetch (with the §5.7 confirmation + auto-build) lands with the \
+             0.4 template work; for now omit --template to use the built-in default",
+        )
+        .at(tref.to_string()),
+        Some(_) => RkError::of(
+            ErrorCode::TemplateNotFound,
+            format!("the `--template {tref}` path is not applied yet"),
+            "local-path templates land with the 0.4 template work; omit --template to use \
+             the built-in default for now",
+        )
+        .at(tref.to_string()),
+        None => RkError::of(
+            ErrorCode::UsageError,
+            format!("`{tref}` is not a valid template reference"),
+            "use gh:owner/repo[@ref], @scope/name, or a local path",
+        )
+        .at(tref.to_string()),
+    }
 }
 
 /// Resolve whether to git-init: `--no-git` off, `--git` on, else default (on for
@@ -631,11 +682,26 @@ mod tests {
     }
 
     #[test]
-    fn remote_template_detection() {
-        assert!(is_remote_template("gh:user/repo"));
-        assert!(is_remote_template("@scope/name"));
-        assert!(!is_remote_template("./local/dir"));
-        assert!(!is_remote_template("default"));
+    fn template_ref_routes_to_the_right_boundary() {
+        // A remote ref is classified remote (TemplateNotFound, not a usage error).
+        assert_eq!(
+            template_not_implemented("gh:user/repo").code,
+            ErrorCode::TemplateNotFound
+        );
+        assert_eq!(
+            template_not_implemented("@scope/name").code,
+            ErrorCode::TemplateNotFound
+        );
+        // A local path is a not-yet-applied template (also TemplateNotFound).
+        assert_eq!(
+            template_not_implemented("./local/dir").code,
+            ErrorCode::TemplateNotFound
+        );
+        // A clearly-malformed ref is a usage error.
+        assert_eq!(
+            template_not_implemented("gh:owner").code,
+            ErrorCode::UsageError
+        );
     }
 
     fn base_args() -> NewArgs {

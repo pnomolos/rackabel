@@ -29,6 +29,10 @@ mod dev_watch;
 mod doctor;
 mod new;
 mod pack;
+// The PATH-subcommand exec path + env contract + built-in precedence (milestone 0.4,
+// FOUNDATION). Unix-only (the fixture plugins are shell scripts with exec bits).
+#[cfg(unix)]
+mod plugin;
 mod validate;
 
 use assert_cmd::prelude::*;

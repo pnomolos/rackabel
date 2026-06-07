@@ -1,11 +1,14 @@
-//! The clap CLI surface for 0.2 (DESIGN §2 synopses).
+//! The clap CLI surface (DESIGN §2 synopses).
 //!
-//! Every 0.2 command appears here with its section-2 flags, plus the GLOBAL flags
+//! Every command appears here with its section-2 flags, plus the GLOBAL flags
 //! (`--no-input`, `--json` where applicable, `--verbose`, `--raw`, the six launcher
-//! `ABLETON_*` overrides exposed as flags — DESIGN §7). The `dev`/`plugin` groups
-//! are later milestones and are deliberately absent. `install` is a hidden alias of
-//! `deploy`. Command-owners fill the `commands::*::run` bodies; this file is frozen.
+//! `ABLETON_*` overrides exposed as flags — DESIGN §7). The `dev` group (0.3) and the
+//! `plugin` group (0.4) are present; `install` is a hidden alias of `deploy`. The
+//! top-level allows external subcommands so an unknown token routes to a PATH-discovered
+//! `rackabel-<foo>` (§5.1) — built-ins always win by construction. Command-owners fill
+//! the `commands::*::run` bodies; this file is frozen.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -13,12 +16,42 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// rackabel — build Max for Live devices and Ableton Live extensions.
 #[derive(Parser)]
 #[command(name = "rackabel", version, about, long_about = None)]
+// `allow_external_subcommands` routes any UNKNOWN leading token (one that matches no
+// built-in) plus its trailing args into the `External` catch-all (§5.1 PATH-convention
+// subcommands). Built-ins ALWAYS win by construction: clap matches a declared
+// subcommand first and only falls through to the external catch-all when no built-in
+// claims the token (verified by `external_routing_only_for_unknown_tokens` below). So
+// `rackabel dev`/`build`/… can never be shadowed by a `rackabel-dev` on PATH (§5.6).
+#[command(allow_external_subcommands = true)]
 pub struct Cli {
     #[command(flatten)]
     pub globals: GlobalFlags,
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// The reserved top-level namespace (DESIGN §5.6). A token naming one of these always
+/// resolves to the built-in and can NEVER be shadowed by a `rackabel-<name>` on PATH
+/// (git/cargo behavior). PATH lookup for an external subcommand happens only for tokens
+/// that match nothing here. The list grows only deliberately — it INCLUDES the planned
+/// future built-ins `publish`/`login` (§8) so the upgrade-time collision detector
+/// (§5.6) predates the first release that adds them, and `install` (the hidden `deploy`
+/// alias). This is the single source of truth both clap and the plugin resolver consult.
+pub const RESERVED_NAMESPACE: &[&str] = &[
+    // current top-level verbs
+    "new", "build", "deploy", "pack", "validate", "doctor", "dev", "plugin", "explain",
+    "install", // the hidden `deploy` alias
+    // planned future built-ins (§8) — reserved now so the §5.6 collision detector
+    // exists before the release that ships them.
+    "publish", "login",
+];
+
+/// Whether `name` is a reserved built-in token (§5.6). Case-sensitive (subcommands are
+/// lowercase). The plugin resolver calls this before any PATH lookup so a built-in
+/// always wins.
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED_NAMESPACE.contains(&name)
 }
 
 /// Global flags honored across commands (DESIGN §7). `--no-input` is honored by
@@ -71,7 +104,7 @@ pub struct GlobalFlags {
     pub storage_base: Option<PathBuf>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 pub enum Command {
     /// Scaffold a project (Extension or M4L device).
     New(NewArgs),
@@ -92,11 +125,97 @@ pub enum Command {
     Explain(ExplainArgs),
     /// The managed dev host: bare `dev` runs the loop; verbs control its lifecycle.
     Dev(DevArgs),
+    /// Manage rackabel's own third-party plugins.
+    Plugin(PluginArgs),
     /// Hidden re-exec target: the detached daemon process (DESIGN §3.1, SPEC D §1).
     /// Never invoked by a user; `dev start`/`dev` re-exec the current binary with this
     /// subcommand to become the session-leading daemon.
     #[command(name = "__daemon", hide = true)]
     Daemon(DaemonArgs),
+    /// A PATH-discovered third-party subcommand `rackabel-<foo>` (DESIGN §5.1). clap
+    /// routes here ONLY for a leading token that matches no built-in (the external
+    /// catch-all); the first element is the `<foo>` name, the rest are forwarded
+    /// verbatim. Built-ins always win, so this never captures a reserved token.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
+}
+
+// --- the `plugin` group (DESIGN §2 plugin table, §5.4) -------------------------
+
+/// `rackabel plugin <verb>` — install/list/which/run/enable/disable/search (§5.4). The
+/// `migrate` verb (hook-contract codemod) is a 0.5 feature and is deliberately absent.
+#[derive(Args, Debug)]
+pub struct PluginArgs {
+    #[command(subcommand)]
+    pub command: PluginCommand,
+}
+
+/// The `plugin` verb subcommands (DESIGN §5.4).
+#[derive(Subcommand, Debug)]
+pub enum PluginCommand {
+    /// Install OWNER/REPO (release asset, else clone+run) or a path/tarball (sideload).
+    Install(PluginInstallArgs),
+    /// Installed plugins + enabled state + pinned ref.
+    #[command(alias = "ls")]
+    List,
+    /// Show which file a name would run (or "shadowed by built-in").
+    Which(PluginNameArgs),
+    /// Run a plugin even if a built-in shadows the name, forwarding trailing args.
+    Run(PluginRunArgs),
+    /// Enable a plugin (and, in 0.5, its hooks).
+    Enable(PluginNameArgs),
+    /// Disable a plugin (and, in 0.5, its hooks).
+    Disable(PluginNameArgs),
+    /// Query the `rackabel-plugin` GitHub topic.
+    Search(PluginSearchArgs),
+}
+
+/// `rackabel plugin install OWNER/REPO|<path|tarball> [--yes] [--json] [--force]`
+#[derive(Args, Debug)]
+pub struct PluginInstallArgs {
+    /// `OWNER/REPO` (gh-style), or a local path/tarball to sideload.
+    #[arg(value_name = "OWNER/REPO|PATH")]
+    pub source: String,
+
+    /// Skip the install confirmation (consent to fetch+run the named source in a script).
+    #[arg(long)]
+    pub yes: bool,
+
+    /// Install past a `plugins.lock` pin mismatch, announcing the change (§5.4/§5.7).
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// `rackabel plugin which|enable|disable <name> [--json]`
+#[derive(Args, Debug)]
+pub struct PluginNameArgs {
+    /// The plugin name (the `<foo>` of a `rackabel-<foo>` executable).
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
+/// `rackabel plugin run <name> [args…]` — the §5.6 escape hatch.
+#[derive(Args, Debug)]
+pub struct PluginRunArgs {
+    /// The plugin name to invoke even when a built-in shadows it.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+
+    /// Arguments forwarded verbatim to the plugin executable.
+    #[arg(
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "ARGS"
+    )]
+    pub args: Vec<OsString>,
+}
+
+/// `rackabel plugin search <term> [--json]`
+#[derive(Args, Debug)]
+pub struct PluginSearchArgs {
+    /// The search term (matched against the `rackabel-plugin` GitHub topic).
+    #[arg(value_name = "TERM")]
+    pub term: String,
 }
 
 // --- the `dev` group (DESIGN §2 dev table, §3) ---------------------------------
@@ -490,4 +609,121 @@ pub struct DoctorArgs {
 pub struct ExplainArgs {
     /// The error code to explain, e.g. `RK0001`.
     pub code: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    /// Pins the reserved namespace (§5.6): every current built-in subcommand, the
+    /// hidden `install` alias, AND the planned future built-ins `publish`/`login`. If a
+    /// new built-in is added, it must be added here too (this test fails otherwise),
+    /// keeping the §5.6 collision detector honest.
+    #[test]
+    fn reserved_namespace_is_pinned() {
+        let expected = [
+            "new", "build", "deploy", "pack", "validate", "doctor", "dev", "plugin", "explain",
+            "install", "publish", "login",
+        ];
+        assert_eq!(RESERVED_NAMESPACE, &expected);
+        for token in expected {
+            assert!(is_reserved(token), "expected `{token}` reserved");
+        }
+        assert!(!is_reserved("foo"));
+        // case-sensitive: subcommands are lowercase
+        assert!(!is_reserved("Build"));
+    }
+
+    /// Every clap subcommand that takes the namespace (visible OR hidden, excluding the
+    /// `__daemon` re-exec target and the external catch-all) must be in
+    /// RESERVED_NAMESPACE, and `publish`/`login` must be reserved ahead of shipping.
+    #[test]
+    fn every_builtin_is_reserved() {
+        let cmd = Cli::command();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            if name == "__daemon" {
+                continue; // the hidden re-exec target is not a user namespace token
+            }
+            assert!(
+                is_reserved(name),
+                "built-in subcommand `{name}` is not in RESERVED_NAMESPACE"
+            );
+            // aliases (e.g. `ls` for `plugin list`) live under their parent, not here.
+        }
+    }
+
+    /// Built-ins always win: clap routes a KNOWN token to its subcommand and only a
+    /// truly-unknown token falls through to the `External` catch-all (§5.1/§5.6).
+    #[test]
+    fn external_routing_only_for_unknown_tokens() {
+        // A known built-in parses as that built-in, never External.
+        let cli = Cli::try_parse_from(["rackabel", "build"]).unwrap();
+        assert!(matches!(cli.command, Command::Build(_)));
+        // `plugin` is a built-in group.
+        let cli = Cli::try_parse_from(["rackabel", "plugin", "list"]).unwrap();
+        assert!(matches!(cli.command, Command::Plugin(_)));
+        // An unknown token routes to External with its trailing args verbatim.
+        let cli = Cli::try_parse_from(["rackabel", "frobnicate", "--wild", "x"]).unwrap();
+        match cli.command {
+            Command::External(argv) => {
+                assert_eq!(argv[0], "frobnicate");
+                assert_eq!(argv[1], "--wild");
+                assert_eq!(argv[2], "x");
+            }
+            other => panic!("expected External, got {other:?}"),
+        }
+    }
+
+    /// The `plugin` group exposes every §5.4 verb with its documented flags.
+    #[test]
+    fn plugin_group_has_section_5_4_verbs() {
+        assert!(matches!(
+            Cli::try_parse_from(["rackabel", "plugin", "install", "owner/repo", "--yes"])
+                .unwrap()
+                .command,
+            Command::Plugin(PluginArgs {
+                command: PluginCommand::Install(_)
+            })
+        ));
+        // `ls` is the documented alias of `list`.
+        assert!(matches!(
+            Cli::try_parse_from(["rackabel", "plugin", "ls"])
+                .unwrap()
+                .command,
+            Command::Plugin(PluginArgs {
+                command: PluginCommand::List
+            })
+        ));
+        // `plugin run <name> -- …` forwards hyphenated args verbatim.
+        let cli =
+            Cli::try_parse_from(["rackabel", "plugin", "run", "foo", "--bar", "baz"]).unwrap();
+        match cli.command {
+            Command::Plugin(PluginArgs {
+                command: PluginCommand::Run(a),
+            }) => {
+                assert_eq!(a.name, "foo");
+                assert_eq!(a.args, vec!["--bar", "baz"]);
+            }
+            other => panic!("expected plugin run, got {other:?}"),
+        }
+        for verb in ["which", "enable", "disable"] {
+            assert!(
+                Cli::try_parse_from(["rackabel", "plugin", verb, "thing"]).is_ok(),
+                "plugin {verb} <name> should parse"
+            );
+        }
+        assert!(Cli::try_parse_from(["rackabel", "plugin", "search", "midi"]).is_ok());
+    }
+
+    /// `new --update` exists on the NewArgs surface (§5.5).
+    #[test]
+    fn new_has_update_flag() {
+        let cli = Cli::try_parse_from(["rackabel", "new", "x", "--update"]).unwrap();
+        match cli.command {
+            Command::New(a) => assert!(a.update),
+            other => panic!("expected new, got {other:?}"),
+        }
+    }
 }

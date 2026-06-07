@@ -34,6 +34,7 @@ fn cli() {
     for stale in [
         std::path::Path::new("rk-home"),
         std::path::Path::new("rk-home-surface"),
+        std::path::Path::new("rk-home-plugin"),
         std::path::Path::new("tests/cli/dev_registry.in/rk-home-reg"),
         std::path::Path::new("tests/cli/dev_register_names.in/rk-home-names"),
     ] {
