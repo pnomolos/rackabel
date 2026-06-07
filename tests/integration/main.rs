@@ -12,6 +12,9 @@ mod dev;
 // The hermetic daemon-lifecycle tests (DAEMON-CORE): real binary + FakeHost seam.
 #[cfg(unix)]
 mod dev_daemon;
+// The watch-loop surface tests (WATCH-LOOP): non-TTY legend, liveness, scope hint.
+#[cfg(unix)]
+mod dev_watch;
 mod doctor;
 mod new;
 mod pack;

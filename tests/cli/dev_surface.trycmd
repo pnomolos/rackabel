@@ -32,7 +32,10 @@ error: `rackabel dev reload` is not implemented yet [RK0309]
 
 A bare token that is NOT a verb routes to the bare loop (the registry name matcher),
 not the verb table — `rackabel dev test` is the subcommand (exit 1, RK1306), while
-`rackabel dev --only test` targets the extension named `test` (the bare loop, exit 3).
+`rackabel dev --only test` targets the extension named `test` (the bare loop). The
+bare-loop `--only` routing + scope behavior is environment-dependent (it gates on Live /
+the daemon), so it is covered hermetically in the WATCH-LOOP integration tests
+(`tests/integration/dev_watch.rs`) rather than this Live-agnostic transcript.
 
 ```
 $ rackabel dev test --no-input
@@ -40,14 +43,5 @@ $ rackabel dev test --no-input
 error: `rackabel dev test` is not implemented yet [RK1306]
   help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
 (run `rackabel explain RK1306` for details)
-
-```
-
-```
-$ rackabel dev --only test --no-input
-? 3
-error: the bare `rackabel dev` loop is not implemented yet [RK0307]
-  help: this part of the managed dev host (DESIGN §3, milestone 0.3) is still being built
-(run `rackabel explain RK0307` for details)
 
 ```
