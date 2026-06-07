@@ -6,11 +6,12 @@ A CLI for building Ableton Live Extensions and Max for Live devices.
 
 ## Status
 
-**0.2 — Live Extensions parity.** Extensions reach full build/deploy/pack/validate
-parity with the official toolchain, plus a richer `new` scaffolder and an extended
+**0.3 — Managed dev host.** `rackabel dev` runs the headline edit→reload loop: a
+supervised Extension Host daemon, a persistent registry, a file watcher that rebuilds and
+hot-reloads on save, per-extension logs, and a no-Live CI entry point — all on top of the
+0.2 build/deploy/pack/validate parity, the richer `new` scaffolder, and the extended
 `doctor`. The Max for Live `[device]` path is preserved (its `.amxd` assembly is still a
-later milestone). The managed dev host (`rackabel dev`), git-hosted templates, and
-lifecycle hooks land in 0.3–0.5.
+later milestone). Git-hosted templates and lifecycle hooks land in 0.4–0.5.
 
 ## Commands
 
@@ -23,6 +24,23 @@ lifecycle hooks land in 0.3–0.5.
 | `validate` | Lint the manifest + artifact against ship rules |
 | `doctor`   | Diagnose the environment (Live, host module, node, User Library, …) |
 | `explain`  | Long-form help for an error code, cargo `--explain` style |
+| `dev`      | The managed dev host: edit→build→deploy→reload loop + lifecycle verbs |
+
+`rackabel dev` is a command group. Bare `dev` runs the watch loop; the verbs control the
+host and its registry:
+
+| `dev` verb | What it does |
+|---|---|
+| `dev` (bare)        | Start the host if needed, then watch + hot-reload + tail logs in the foreground |
+| `dev start` / `stop`| Launch / cleanly stop the daemonized Extension Host |
+| `dev status`        | Daemon + per-extension state, resolved Live/host paths, inspector, reload metrics |
+| `dev register` / `unregister` | Add / remove a project in the persistent registry (`--recursive` for a workspace) |
+| `dev enable` / `disable`      | Toggle whether a registered entry is loaded |
+| `dev list`          | Show the registry with status columns (`--json` for the stable shape) |
+| `dev watch`         | Explicit watch loop (never auto-starts a daemon) |
+| `dev reload`        | Force a whole-host reload now (`--strict` makes a host-incompatible skip fatal) |
+| `dev logs`          | Tail/filter the per-extension log sink (`--follow`, `--since`, `--level`, `--json`) |
+| `dev test`          | Build + run the project's tests / headless smoke — the no-Live CI entry point |
 
 ## Usage — Live Extension
 
@@ -57,6 +75,44 @@ rackabel install                              # copy into Ableton's User Library
 
 Device kinds: `audio-effect` (default), `midi-effect`, `instrument`.
 
+## Usage — managed dev host
+
+The dev host keeps a supervised Extension Host running and hot-reloads your extensions on
+save. It needs Ableton Live running with **Developer Mode** on (Preferences → Extensions);
+if Live is down or Developer Mode is off, `rackabel dev` tells you what to flip and waits
+(or, under `--no-input`, exits `3` deterministically for CI).
+
+```sh
+rackabel dev register .          # add the current project to the registry
+rackabel dev register ../pkgs --recursive   # add every workspace member under a root
+
+rackabel dev                     # start-if-needed, then watch: edit a source file and it
+                                 # rebuilds → deploys → reloads the host automatically
+                                 #   rebuilt (120ms) → updated in Live (40ms) → reloaded my-ext
+
+rackabel dev status              # is the host up? which extensions are loaded / skipped?
+rackabel dev logs my-ext --follow            # tail one extension's console + lifecycle
+rackabel dev reload              # force a reload now (e.g. after editing the manifest)
+rackabel dev stop                # stop the host cleanly (no orphaned node processes)
+```
+
+Scope the loop to a subset with `--only` or a `--` separator (both match registry names,
+never the verbs): `rackabel dev --only my-ext` / `rackabel dev -- my-ext other-ext`.
+
+`dev test` is the headless CI entry point — it builds and runs each target's test harness
+with **no Live, no daemon, and no GUI**, emitting a stable `--json` envelope:
+
+```sh
+rackabel dev test --json         # { "targets": [ … ], "passed": N, "failed": M }
+```
+
+A host-incompatible extension (its `minimum_api_version` exceeds the host's API version)
+is **pre-filtered** out of the loaded set and reported as `Skipped:` rather than allowed to
+abort the whole host — `dev reload --strict` turns any such skip into a fatal `exit 1`.
+
+The host runs as a daemon under `RACKABEL_HOME`, one per resolved Live install, so closing
+the terminal leaves it running; `dev logs` / `dev status` from another shell still work.
+
 ## Project layout
 
 A rackabel project is a directory with a `rackabel.toml` manifest. Extensions:
@@ -75,6 +131,9 @@ extra_dist_files = []     # extra files (relative to dist/) shipped alongside th
 
 [extension.pack]
 targets = []              # e.g. ["darwin-arm64", "darwin-x64"] for native builds
+
+[dev]
+debounce_ms = 200         # watch-loop debounce before a rebuild→reload (default 200)
 ```
 
 Most fields are inferred when absent (and echoed): `name` from the directory, `author`

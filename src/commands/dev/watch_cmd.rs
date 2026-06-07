@@ -171,29 +171,24 @@ fn resolve_working_set(
     Ok(enabled)
 }
 
-/// Read `[dev].debounce_ms` from the cwd project manifest (best-effort; the foundation's
-/// `ManifestRaw` has no `[dev]` table, so we parse the raw TOML for the optional value
-/// rather than editing the shared manifest model — INTEGRATOR NOTE in the summary).
+/// Read `[dev].debounce_ms` from the cwd project manifest (best-effort). The `[dev]` table
+/// is now first-class on `ManifestRaw` (D-65 follow-up), so this reads the typed value
+/// through the shared manifest model rather than re-parsing raw TOML.
 fn debounce_ms(ctx: &Ctx) -> u64 {
     read_debounce_from(&ctx.cwd).unwrap_or(DEFAULT_DEBOUNCE_MS)
 }
 
 fn read_debounce_from(start: &Path) -> Option<u64> {
-    // Walk up for rackabel.toml (mirrors Project::discover) and read [dev].debounce_ms.
-    for dir in start.ancestors() {
-        let candidate = dir.join("rackabel.toml");
-        if candidate.is_file() {
-            let text = std::fs::read_to_string(&candidate).ok()?;
-            let value: toml::Value = toml::from_str(&text).ok()?;
-            return value
-                .get("dev")
-                .and_then(|d| d.get("debounce_ms"))
-                .and_then(|v| v.as_integer())
-                .filter(|n| *n > 0)
-                .map(|n| n as u64);
-        }
-    }
-    None
+    // Walk up for the nearest rackabel.toml and read its typed [dev].debounce_ms. A
+    // missing manifest / unparseable file / absent or non-positive value all fall back to
+    // the default (None here → DEFAULT_DEBOUNCE_MS at the call site).
+    let project = crate::manifest::Project::discover(start).ok()?;
+    project
+        .raw
+        .dev
+        .as_ref()
+        .and_then(|d| d.debounce_ms)
+        .filter(|n| *n > 0)
 }
 
 fn unknown_name_error(token: &str) -> RkError {

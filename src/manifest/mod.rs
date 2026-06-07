@@ -37,6 +37,10 @@ pub struct ManifestRaw {
     pub toolchain: Option<Toolchain>,
     pub meta: Option<Meta>,
     pub workspace: Option<Workspace>,
+    /// `[dev]` — managed dev-host knobs (milestone 0.3). Optional so every other command
+    /// accepts a manifest that carries it (without it, `deny_unknown_fields` would reject
+    /// `[dev]` as RK0003 while the watch loop read it separately — D-65).
+    pub dev: Option<Dev>,
 }
 
 /// `[extension]` — all fields optional with documented inference (DESIGN §4.2).
@@ -117,6 +121,15 @@ pub struct Meta {
 pub struct Workspace {
     #[serde(default)]
     pub members: Vec<String>,
+}
+
+/// `[dev]` — managed dev-host knobs (milestone 0.3, DESIGN §3.3).
+#[derive(Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Dev {
+    /// Watch-loop debounce before a rebuild→deploy→reload, in milliseconds. The watch
+    /// loop defaults to 200 ms when this is absent.
+    pub debounce_ms: Option<u64>,
 }
 
 /// What kind of project this is. Exactly one of these is valid.

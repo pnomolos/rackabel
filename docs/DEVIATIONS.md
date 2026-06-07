@@ -816,14 +816,17 @@ of the frozen `Client` API; the build→deploy→reload ordering contract is unc
 
 ### D-65. `[dev].debounce_ms` is read by parsing raw TOML, not via `ManifestRaw` (SPEC D §4.3, DESIGN §3.3)
 
-DESIGN §3.3 specifies a `[dev].debounce_ms` override, but the foundation's `ManifestRaw`
-(`src/manifest/mod.rs`, `#[serde(deny_unknown_fields)]`) has no `[dev]` table and is
-foundation-owned (not a watch-loop file). Rather than edit the shared manifest model, the
-watch command reads the optional value by parsing `rackabel.toml` as a generic `toml::Value`
-(`watch_cmd::read_debounce_from`), defaulting to 200 ms. INTEGRATOR NOTE: a first-class
-`[dev]` table on `ManifestRaw` (with `debounce_ms`, future `[dev]` knobs) is the clean
-home for this; the parse-the-raw-TOML reader is a deliberately small, ownership-respecting
-stand-in until that lands.
+DESIGN §3.3 specifies a `[dev].debounce_ms` override. The watch-loop agent originally read
+it by parsing `rackabel.toml` as a generic `toml::Value`, because the foundation's
+`ManifestRaw` (`src/manifest/mod.rs`, `#[serde(deny_unknown_fields)]`) had no `[dev]`
+table. RESOLVED BY THE INTEGRATOR: a `[dev]` table with `debounce_ms` is now first-class on
+`ManifestRaw` (an `Option<Dev>` field + a `Dev` struct), so a manifest carrying `[dev]` is
+accepted by *every* command (previously `deny_unknown_fields` rejected `[dev]` as `RK0003`
+in build/deploy/validate/pack while the watch loop read it separately — an inconsistency a
+user would hit the moment they added the documented knob). `watch_cmd::read_debounce_from`
+now reads the typed `project.raw.dev.debounce_ms` via `Project::discover`, defaulting to
+200 ms when absent/non-positive. The `[dev]` table is documented in the README manifest
+example.
 
 ### D-66. Watch chain quiets reused build/deploy via a `json`-set ctx clone (DESIGN §8)
 
