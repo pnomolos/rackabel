@@ -96,6 +96,13 @@ pub struct RegistryEntry {
     /// Registered-and-active (`true`) vs registered-but-dormant (`false`).
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// The project kind chosen at `register --type` time (or derived from a present
+    /// manifest). `None` means "resolve at use" — a manifestless project then takes
+    /// the synthesized default (Extension, or `package.json`'s opt-in Device).
+    /// `#[serde(default)]` keeps every pre-existing `registry.toml` (no `kind` key)
+    /// loading unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::manifest::Kind>,
 }
 
 /// The daemon's view of the host process, as reported over IPC and by `dev status`.

@@ -6,7 +6,12 @@
 //! Behavior (§3.2 / §4.4):
 //!   - `register [PATH]` defaults to the cwd; the entry `name` is the dir basename,
 //!     auto-disambiguated against existing names AND reserved dev verbs (parent-
-//!     prefixed, echoed when it changes).
+//!     prefixed, echoed when it changes). The path is registrable when it bears a
+//!     `rackabel.toml` OR a `package.json` (the manifestless, synthesized project of
+//!     DESIGN §4.1) OR is vouched for with `--type`.
+//!   - `--type extension|device` records the project kind on the entry (the
+//!     manifestless project's kind, or an override of a present manifest table). It
+//!     also makes a bare directory registrable. Single-path only.
 //!   - `--recursive` registers every member of a monorepo via `[workspace].members`
 //!     (when `PATH` is a workspace root) else a manifest scan, SKIPPING library
 //!     members (no `[extension]`/`[device]`).
@@ -127,7 +132,8 @@ pub fn run(args: &DevRegisterArgs, ctx: &Ctx) -> CmdResult<()> {
         },
     };
 
-    let stored = reg.add_named(&path, final_name, args.disabled)?;
+    let kind = args.kind.map(|k| k.to_manifest_kind());
+    let stored = reg.add_named(&path, final_name, kind, args.disabled)?;
     reg.save()?;
     ui::frame::emit(
         ui::frame::Symbol::Good,

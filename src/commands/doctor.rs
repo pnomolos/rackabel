@@ -233,6 +233,9 @@ pub fn diagnose(project: Option<&Project>, ctx: &Ctx) -> Diagnosis {
     // --- Extensions toolkit (non-blocking note outside a project) ---
     check_toolkit(&mut diag, project);
 
+    // --- Manifestless (synthesized) project, surfaced so the inference isn't invisible ---
+    check_project_anchor(&mut diag, project);
+
     // --- Per-project extension checks (only when in an extension project) ---
     if let Some(proj) = project
         && proj.kind().ok() == Some(Kind::Extension)
@@ -638,6 +641,44 @@ fn check_toolkit(diag: &mut Diagnosis, project: Option<&Project>) {
             }
         }
     }
+}
+
+/// Surface a *synthesized* (manifestless) project explicitly so the fallback inference
+/// isn't invisible (DESIGN §4.1). When the discovered project has no `rackabel.toml` on
+/// disk (`manifest_path.is_none()`) it was anchored on a `package.json` and its kind came
+/// from the default (or a `package.json` `"rackabel": { "kind": "device" }` opt-in). We
+/// report that as a normal informational `[!]` note — never a failure — with a tip to pin
+/// the fields. A real `rackabel.toml` (or no project at all) adds no row here.
+fn check_project_anchor(diag: &mut Diagnosis, project: Option<&Project>) {
+    let Some(proj) = project else {
+        return;
+    };
+    if proj.manifest_path.is_some() {
+        // A real on-disk manifest: nothing to surface, behavior unchanged.
+        return;
+    }
+
+    // Resolve the defaulted kind for the message; if it somehow can't resolve, the
+    // synthesized default is Extension, so fall back to that wording rather than nothing.
+    let kind = proj.kind().unwrap_or(Kind::Extension);
+    let kind_str = match kind {
+        Kind::Extension => "extension",
+        Kind::Device => "device",
+        Kind::Workspace => "workspace",
+    };
+    diag.push(
+        Check::new(
+            "project.manifestless",
+            CheckStatus::Warn,
+            format!(
+                "project: manifestless — anchored at package.json, kind={kind_str} (default)"
+            ),
+        )
+        .with_help(
+            "run `rackabel new` or add an [extension] table to rackabel.toml to pin fields.",
+        )
+        .with_detail(format!("anchor: {}", proj.root.join("package.json").display())),
+    );
 }
 
 /// Manifest validity + `minimumApiVersion` compatibility (a hard gate — DESIGN §2).

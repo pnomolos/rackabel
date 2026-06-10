@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::Ctx;
 use crate::error::{CmdResult, ErrorCode, RkError};
-use crate::manifest::{MANIFEST_NAME, Project};
+use crate::manifest::{Kind, MANIFEST_NAME, Project};
 
 use super::{DEV_VERBS, RegistryEntry, registry_lock_path, registry_path};
 
@@ -162,10 +162,12 @@ impl Registry {
         &mut self,
         path: &Path,
         name: Option<String>,
+        kind: Option<Kind>,
         disabled: bool,
         _ctx: &Ctx,
     ) -> CmdResult<String> {
-        let root = require_manifest_dir(path)?;
+        let root = require_project_dir(path, kind.is_some())?;
+        let resolved_kind = resolve_entry_kind(&root, kind);
         let taken = self.taken_names();
         let chosen = match name {
             Some(explicit) => {
@@ -185,6 +187,7 @@ impl Registry {
             path: root,
             source: super::Source::Dist,
             enabled: !disabled,
+            kind: resolved_kind,
         });
         Ok(chosen)
     }
@@ -195,8 +198,15 @@ impl Registry {
     /// (`register --name status`, accepted with a warning) is stored verbatim; such an
     /// entry is reachable only via `--only`/`--`, never the bare `dev` parse. An entry
     /// collision is still rejected (`RK0312`) — the caller must have resolved it first.
-    pub fn add_named(&mut self, path: &Path, name: String, disabled: bool) -> CmdResult<String> {
-        let root = require_manifest_dir(path)?;
+    pub fn add_named(
+        &mut self,
+        path: &Path,
+        name: String,
+        kind: Option<Kind>,
+        disabled: bool,
+    ) -> CmdResult<String> {
+        let root = require_project_dir(path, kind.is_some())?;
+        let resolved_kind = resolve_entry_kind(&root, kind);
         if self.taken_names().contains(&name) {
             return Err(RkError::of(
                 ErrorCode::NameCollision,
@@ -209,6 +219,7 @@ impl Registry {
             path: root,
             source: super::Source::Dist,
             enabled: !disabled,
+            kind: resolved_kind,
         });
         Ok(name)
     }
@@ -257,7 +268,10 @@ impl Registry {
             if already {
                 continue;
             }
-            let name = self.add(&dir, None, disabled, ctx)?;
+            // Recursive members are manifest-based (a `[workspace].members` /
+            // manifest scan), so the kind is derived per-member from the manifest;
+            // there is no single `--type` to apply across N members.
+            let name = self.add(&dir, None, None, disabled, ctx)?;
             added.push(name);
         }
         Ok(added)
@@ -487,10 +501,18 @@ fn read_minimum_api_version(path: &Path) -> Option<semver::Version> {
     semver::Version::parse(raw).ok()
 }
 
-/// True if `path` (or `path/manifest`-bearing) holds a `rackabel.toml`.
-fn require_manifest_dir(path: &Path) -> CmdResult<PathBuf> {
-    let candidate = path.join(MANIFEST_NAME);
-    if candidate.is_file() {
+/// Resolve `path` to a registrable project root. A project is anchored by a
+/// `rackabel.toml` OR a `package.json` (the manifestless, synthesized case, DESIGN
+/// §4.1) — either is enough to register. An explicit `--type` (`has_kind`) also
+/// suffices, so a bare directory the user vouched for is accepted. Being handed the
+/// `rackabel.toml` file itself resolves to its parent. `RK0001` only when NONE of
+/// these hold.
+fn require_project_dir(path: &Path, has_kind: bool) -> CmdResult<PathBuf> {
+    // A dir that anchors a project (manifest or package.json), or that the user
+    // explicitly typed with `--type`.
+    if path.is_dir()
+        && (path.join(MANIFEST_NAME).is_file() || path.join("package.json").is_file() || has_kind)
+    {
         return Ok(path.to_path_buf());
     }
     // Also accept being handed the manifest file itself.
@@ -502,10 +524,26 @@ fn require_manifest_dir(path: &Path) -> CmdResult<PathBuf> {
     }
     Err(RkError::of(
         ErrorCode::NoManifest,
-        "no rackabel.toml in that path",
-        "register a directory that holds a rackabel.toml (or use --recursive for a monorepo)",
+        "no rackabel.toml or package.json in that path",
+        "register a directory that holds a rackabel.toml or a package.json \
+         (or pass --type extension|device), or use --recursive for a monorepo",
     )
     .at(path.display().to_string()))
+}
+
+/// Best-effort resolve the kind to STORE on a new entry: an explicit `--type` wins;
+/// otherwise, if the root bears a real `rackabel.toml`, read its declared `kind()`
+/// (errors — both/neither table — are ignored, leaving `None`); a `package.json`-only
+/// anchor stays `None` and is resolved (Extension by default) at use time. `root` is
+/// an already-resolved project dir.
+fn resolve_entry_kind(root: &Path, explicit: Option<Kind>) -> Option<Kind> {
+    if explicit.is_some() {
+        return explicit;
+    }
+    if !root.join(MANIFEST_NAME).is_file() {
+        return None;
+    }
+    Project::discover(root).ok().and_then(|p| p.kind().ok())
 }
 
 /// Every manifest-bearing directory under `root` (inclusive), shallow-walked via the
@@ -686,7 +724,7 @@ mod tests {
         write_project(&proj, None);
 
         let mut reg = Registry::load(&ctx).unwrap();
-        let name = reg.add(&proj, None, false, &ctx).unwrap();
+        let name = reg.add(&proj, None, None, false, &ctx).unwrap();
         assert_eq!(name, "my-ext");
         reg.save().unwrap();
 
@@ -755,12 +793,14 @@ mod tests {
                 path: ok,
                 source: super::super::Source::Dist,
                 enabled: true,
+                kind: None,
             },
             RegistryEntry {
                 name: "bad".into(),
                 path: bad,
                 source: super::super::Source::Dist,
                 enabled: true,
+                kind: None,
             },
         ];
         let host = semver::Version::parse("1.0.0").unwrap();
@@ -839,7 +879,7 @@ mod tests {
         let proj = tmp.path().join("packages/thing");
         write_project(&proj, None);
         let mut reg = Registry::load(&ctx).unwrap();
-        reg.add(&proj, None, false, &ctx).unwrap();
+        reg.add(&proj, None, None, false, &ctx).unwrap();
 
         // Free.
         assert_eq!(
@@ -866,14 +906,14 @@ mod tests {
         write_project(&proj, None);
         let mut reg = Registry::load(&ctx).unwrap();
         // A verb name forced through (the register verb's --name-equals-verb path).
-        let stored = reg.add_named(&proj, "status".to_string(), false).unwrap();
+        let stored = reg.add_named(&proj, "status".to_string(), None, false).unwrap();
         assert_eq!(stored, "status");
         assert_eq!(reg.find("status").unwrap().name, "status");
         // A duplicate is rejected with RK0312.
         let proj2 = tmp.path().join("vd2");
         write_project(&proj2, None);
         let err = reg
-            .add_named(&proj2, "status".to_string(), false)
+            .add_named(&proj2, "status".to_string(), None, false)
             .unwrap_err();
         assert_eq!(err.code, ErrorCode::NameCollision);
     }
@@ -891,6 +931,7 @@ mod tests {
             path: none,
             source: super::super::Source::Dist,
             enabled: true,
+            kind: None,
         }];
         let host = semver::Version::parse("1.0.0").unwrap();
         let (kept, skipped) = Registry::prefilter(&entries, &host);
@@ -905,7 +946,7 @@ mod tests {
         let proj = tmp.path().join("ext");
         write_project(&proj, None);
         let mut reg = Registry::load(&ctx).unwrap();
-        reg.add(&proj, None, false, &ctx).unwrap();
+        reg.add(&proj, None, None, false, &ctx).unwrap();
         // The same path resolves to the existing entry (idempotency guard, finding #6).
         assert_eq!(reg.find_by_path(&proj).unwrap().name, "ext");
         // An unregistered path is None.
@@ -927,12 +968,97 @@ mod tests {
         let proj = tmp.path().join("ext");
         write_project(&proj, None);
         let mut reg = Registry::load(&ctx).unwrap();
-        reg.add(&proj, None, false, &ctx).unwrap();
+        reg.add(&proj, None, None, false, &ctx).unwrap();
         reg.set_enabled("ext", false).unwrap();
         assert!(!reg.find("ext").unwrap().enabled);
         let removed = reg.remove("ext", false).unwrap();
         assert_eq!(removed, vec!["ext".to_string()]);
         assert!(reg.entries().is_empty());
+    }
+
+    /// A `package.json`-only directory (no `rackabel.toml`) is registrable — the
+    /// manifestless / synthesized anchor of DESIGN §4.1. With no `--type`, the stored
+    /// kind stays `None` (resolved at use time).
+    #[test]
+    fn add_accepts_package_json_only_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let proj = tmp.path().join("pkg-only");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("package.json"), r#"{ "name": "pkg-only" }"#).unwrap();
+
+        let mut reg = Registry::load(&ctx).unwrap();
+        let name = reg.add(&proj, None, None, false, &ctx).unwrap();
+        assert_eq!(name, "pkg-only");
+        assert!(reg.find("pkg-only").unwrap().kind.is_none());
+    }
+
+    /// An explicit `--type device` makes a bare directory registrable and is stored
+    /// verbatim on the entry (it wins over any manifest table).
+    #[test]
+    fn add_explicit_type_makes_bare_dir_registrable_and_stores_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let proj = tmp.path().join("bare");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let mut reg = Registry::load(&ctx).unwrap();
+        let name = reg
+            .add(&proj, None, Some(Kind::Device), false, &ctx)
+            .unwrap();
+        assert_eq!(reg.find(&name).unwrap().kind, Some(Kind::Device));
+    }
+
+    /// A real `rackabel.toml` with no `--type` has its kind derived from the manifest
+    /// table and stored on the entry.
+    #[test]
+    fn add_derives_kind_from_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let proj = tmp.path().join("ext");
+        write_project(&proj, None); // writes an [extension] manifest
+
+        let mut reg = Registry::load(&ctx).unwrap();
+        reg.add(&proj, None, None, false, &ctx).unwrap();
+        assert_eq!(reg.find("ext").unwrap().kind, Some(Kind::Extension));
+    }
+
+    /// Neither a manifest, nor a `package.json`, nor a `--type` ⇒ `RK0001`.
+    #[test]
+    fn add_rejects_unanchored_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let proj = tmp.path().join("nada");
+        std::fs::create_dir_all(&proj).unwrap();
+
+        let mut reg = Registry::load(&ctx).unwrap();
+        let err = reg.add(&proj, None, None, false, &ctx).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NoManifest);
+    }
+
+    /// BACKWARD COMPAT: a pre-existing `registry.toml` written before the `kind` field
+    /// existed (no `kind` key) must still deserialize — `#[serde(default)]` leaves it
+    /// `None` ("resolve at use"). Guards the no-schema-break promise of manifest-optional.
+    #[test]
+    fn old_registry_toml_without_kind_still_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ctx = ctx_with_home(tmp.path());
+        let path = registry_path(&ctx);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // The legacy on-disk shape: name/path/source/enabled, NO kind.
+        std::fs::write(
+            &path,
+            "[[extension]]\nname = \"legacy\"\npath = \"/code/legacy\"\n\
+             source = \"dist\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let reg = Registry::load(&ctx).unwrap();
+        assert_eq!(reg.entries().len(), 1);
+        let e = &reg.entries()[0];
+        assert_eq!(e.name, "legacy");
+        assert!(e.enabled);
+        assert_eq!(e.kind, None, "an absent kind key deserializes to None");
     }
 
     #[test]
@@ -942,7 +1068,7 @@ mod tests {
         let proj = tmp.path().join("ext");
         write_project(&proj, None);
         let mut reg = Registry::load(&ctx).unwrap();
-        reg.add(&proj, None, false, &ctx).unwrap();
+        reg.add(&proj, None, None, false, &ctx).unwrap();
         reg.save().unwrap();
         // The lockfile must not linger.
         assert!(!registry_lock_path(&ctx).exists());

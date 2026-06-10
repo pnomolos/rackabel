@@ -12,6 +12,7 @@
 //! are re-exported from here as a compatibility shim until the M4L paths migrate.
 
 pub mod infer;
+pub mod pkgjson;
 pub mod sdk_manifest;
 pub mod state;
 
@@ -138,7 +139,11 @@ pub struct Dev {
 }
 
 /// What kind of project this is. Exactly one of these is valid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` (lowercase) so the dev registry can persist a kind
+/// chosen at `register --type` time (registry agent owns the entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Kind {
     Extension,
     Device,
@@ -146,16 +151,37 @@ pub enum Kind {
 }
 
 /// A loaded project: its root + the raw manifest. Resolution is on demand.
+///
+/// A project may be *synthesized* — anchored on a `package.json` with no
+/// `rackabel.toml` on disk (DESIGN §4.1). In that case `manifest_path` is `None`,
+/// `raw` is the [`ManifestRaw::default()`] (all tables absent), and `pkg` carries
+/// the anchoring `package.json` as a fallback inference + kind source. When a real
+/// `rackabel.toml` is present it ALWAYS wins; `package.json` only fills gaps.
 #[derive(Debug)]
 pub struct Project {
     pub root: PathBuf,
     pub raw: ManifestRaw,
+    /// `Some(path)` for a real on-disk `rackabel.toml`; `None` for a synthesized
+    /// (manifestless) project anchored on a `package.json`.
+    pub manifest_path: Option<PathBuf>,
+    /// The anchoring / adjacent `package.json`, if any — a fallback inference and
+    /// kind source. Never authoritative over a present `rackabel.toml`.
+    pub pkg: Option<pkgjson::PkgJson>,
+    /// A kind injected by the caller (the dev registry's `--type`), checked FIRST
+    /// in [`Self::kind`] so a registered project resolves without a manifest.
+    pub kind_override: Option<Kind>,
 }
 
 impl Project {
-    /// Walk up from `start` for the nearest `rackabel.toml` and load it.
-    /// `RK0001` if none found, `RK0003` on a parse error.
+    /// Walk up from `start` for the project root (DESIGN §4.1).
+    ///
+    /// Anchoring order: (a) the nearest `rackabel.toml` wins (today's behavior),
+    /// parsed as a real manifest; (b) else the nearest `package.json` anchors a
+    /// *synthesized* manifestless project; (c) else `RK0001`. A present
+    /// `rackabel.toml` always wins — `package.json` is only a fallback anchor.
+    /// `RK0003` on a manifest parse error.
     pub fn discover(start: &Path) -> CmdResult<Self> {
+        // (a) A real rackabel.toml anywhere up the tree wins.
         for dir in start.ancestors() {
             let candidate = dir.join(MANIFEST_NAME);
             if candidate.is_file() {
@@ -177,21 +203,61 @@ impl Project {
                     .at(candidate.display().to_string())
                     .raw(e.into())
                 })?;
+                let root = dir.to_path_buf();
+                let pkg = pkgjson::read(&root);
                 return Ok(Self {
-                    root: dir.to_path_buf(),
+                    root,
                     raw,
+                    manifest_path: Some(candidate),
+                    pkg,
+                    kind_override: None,
                 });
             }
         }
+        // (b) No manifest — fall back to the nearest package.json as the anchor, but
+        // BOUNDED (#5): a package.json inside `node_modules` is a dependency manifest,
+        // never a project root; and we never anchor at or above the home directory, so a
+        // stray `~/package.json` can't silently turn an arbitrary cwd into a "project"
+        // (that case must stay a clean RK0001).
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        for dir in start.ancestors() {
+            if home.as_deref() == Some(dir) {
+                break;
+            }
+            if dir.components().any(|c| c.as_os_str() == "node_modules") {
+                continue;
+            }
+            if dir.join("package.json").is_file() {
+                let root = dir.to_path_buf();
+                let pkg = pkgjson::read(&root);
+                return Ok(Self {
+                    root,
+                    raw: ManifestRaw::default(),
+                    manifest_path: None,
+                    pkg,
+                    kind_override: None,
+                });
+            }
+        }
+        // (c) Neither anchor — RK0001.
         Err(RkError::of(
             ErrorCode::NoManifest,
             "no manifest found",
-            "run `rackabel new` to scaffold one, or cd into a project directory",
+            "run `rackabel new` to scaffold one, add a package.json, or cd into a project directory",
         )
         .at(format!(
-            "looked for {MANIFEST_NAME} in {} and its parents",
+            "looked for {MANIFEST_NAME} or package.json in {} and its parents",
             start.display()
         )))
+    }
+
+    /// Discover the project, then inject a caller-supplied `kind` as the override
+    /// (checked first in [`Self::kind`]). Used by the dev registry's `--type` path
+    /// so a registered, manifestless project resolves to the registered kind.
+    pub fn discover_with_kind(start: &Path, kind: Option<Kind>) -> CmdResult<Self> {
+        let mut project = Self::discover(start)?;
+        project.kind_override = kind;
+        Ok(project)
     }
 
     /// Discover the project from the cwd recorded in `ctx`.
@@ -201,10 +267,36 @@ impl Project {
 
     /// The project kind. `RK0002` if both or neither `[extension]`/`[device]`
     /// (unless a `[workspace]` makes it a workspace root).
+    ///
+    /// A caller-injected `kind_override` (the dev registry's `--type`) wins first.
+    /// A present table always decides next (including the RK0002 errors). Only a
+    /// *synthesized* (manifestless) project with no recognized table falls through
+    /// to the default: `package.json`'s `"rackabel": { "kind": "device" }` opts in
+    /// to Device, otherwise Extension (DESIGN §4.1).
     pub fn kind(&self) -> CmdResult<Kind> {
         let has_ext = self.raw.extension.is_some();
         let has_dev = self.raw.device.is_some();
         let has_ws = self.raw.workspace.is_some();
+        if let Some(k) = self.kind_override {
+            // A `--type`/registry override may only DECIDE the kind when the present
+            // manifest declares no conflicting table. If the manifest actually
+            // declares the OTHER kind's table, overriding would route to the wrong
+            // resolver (and previously panicked) — reject it explicitly (FIX #3).
+            let conflicts = match k {
+                Kind::Extension => has_dev,
+                Kind::Device => has_ext,
+                Kind::Workspace => has_ext || has_dev,
+            };
+            if conflicts {
+                return Err(RkError::of(
+                    ErrorCode::AmbiguousKind,
+                    "--type conflicts with the table declared in rackabel.toml",
+                    "drop --type (the manifest already declares the kind), or fix the manifest's table to match",
+                )
+                .at(self.manifest_path_string()));
+            }
+            return Ok(k);
+        }
         match (has_ext, has_dev, has_ws) {
             (true, false, _) => Ok(Kind::Extension),
             (false, true, _) => Ok(Kind::Device),
@@ -215,12 +307,32 @@ impl Project {
                 "keep exactly one — split them into separate projects (a workspace can hold both)",
             )
             .at(self.manifest_path_string())),
-            (false, false, false) => Err(RkError::of(
-                ErrorCode::AmbiguousKind,
-                "this project declares neither [extension] nor [device]",
-                "add an [extension] or [device] table (see `rackabel new`)",
-            )
-            .at(self.manifest_path_string())),
+            (false, false, false) => {
+                if self.manifest_path.is_some() {
+                    // A real but empty manifest is a genuine user mistake.
+                    Err(RkError::of(
+                        ErrorCode::AmbiguousKind,
+                        "this project declares neither [extension] nor [device]",
+                        "add an [extension] or [device] table (see `rackabel new`)",
+                    )
+                    .at(self.manifest_path_string()))
+                } else {
+                    // Synthesized (manifestless) project: default to Extension
+                    // unless package.json opts in to a device.
+                    let is_device = self
+                        .pkg
+                        .as_ref()
+                        .and_then(|p| p.rackabel.as_ref())
+                        .and_then(|r| r.kind.as_deref())
+                        .map(|k| k.eq_ignore_ascii_case("device"))
+                        .unwrap_or(false);
+                    Ok(if is_device {
+                        Kind::Device
+                    } else {
+                        Kind::Extension
+                    })
+                }
+            }
         }
     }
 
@@ -235,14 +347,32 @@ impl Project {
             )
             .at(self.manifest_path_string()));
         }
-        // Safe: kind() confirmed extension is present.
-        let ext = self.raw.extension.as_ref().expect("extension present");
+        // A synthesized (manifestless) project resolves as an extension with no
+        // `[extension]` table on disk; fall back to a defaulted `ExtensionRaw` so
+        // every field infers (dir basename, git author, 0.1.0, src/extension.ts).
+        let default_ext = ExtensionRaw::default();
+        let ext = self.raw.extension.as_ref().unwrap_or(&default_ext);
         let mut inferred = Vec::new();
+
+        // Inference order per field (DESIGN §4.2): manifest -> package.json -> default.
+        // package.json is consulted ONLY for synthesized (manifestless) projects;
+        // when a real `rackabel.toml` is present it never participates — a missing
+        // field infers manifest -> git/dir/default exactly as before (FIX #4). Any
+        // package.json value used here is still an *inferred* value, so it echoes
+        // like any other inference.
+        let pkg = if self.manifest_path.is_none() {
+            self.pkg.as_ref()
+        } else {
+            None
+        };
 
         let name = match &ext.name {
             Some(n) => n.clone(),
             None => {
-                let n = infer::infer_name_from_dir(&self.root);
+                let from_pkg = pkg
+                    .and_then(|p| p.rackabel.as_ref().and_then(|r| r.name.clone()).or_else(|| p.name.clone()))
+                    .filter(|s| !s.trim().is_empty());
+                let n = from_pkg.unwrap_or_else(|| infer::infer_name_from_dir(&self.root));
                 ui::echo_inferred("name", &n, "set [extension].name to override", ctx);
                 inferred.push(InferredField {
                     key: "name",
@@ -255,7 +385,10 @@ impl Project {
         let author = match &ext.author {
             Some(a) => a.clone(),
             None => {
-                let a = infer::infer_author_from_git().unwrap_or_default();
+                let a = pkg
+                    .and_then(|p| p.author_display())
+                    .or_else(infer::infer_author_from_git)
+                    .unwrap_or_default();
                 if a.is_empty() {
                     // We do not hard-fail; the empty author surfaces in validate (RK4001).
                     ui::echo_inferred(
@@ -278,7 +411,12 @@ impl Project {
         let version = match &ext.version {
             Some(v) => parse_version(v, "version")?,
             None => {
-                let v = infer::default_version();
+                let v = match pkg.and_then(|p| p.version.as_deref()) {
+                    // A valid package.json version wins over the 0.1.0 default; an
+                    // unparseable one falls through silently to the default.
+                    Some(s) => semver::Version::parse(s).unwrap_or_else(|_| infer::default_version()),
+                    None => infer::default_version(),
+                };
                 ui::echo_inferred(
                     "version",
                     &v.to_string(),
@@ -296,7 +434,11 @@ impl Project {
         let entry = match &ext.entry {
             Some(e) => e.clone(),
             None => {
-                let e = infer::infer_entry(&self.root);
+                let from_pkg = pkg
+                    .and_then(|p| p.rackabel.as_ref().and_then(|r| r.entry.clone()))
+                    .filter(|s| !s.trim().is_empty())
+                    .map(PathBuf::from);
+                let e = from_pkg.unwrap_or_else(|| infer::infer_entry(&self.root));
                 ui::echo_inferred(
                     "entry",
                     &e.display().to_string(),
@@ -364,8 +506,14 @@ impl Project {
             .to_string()
     }
 
+    /// A location string for error `.at(...)` sites. Prefers the real manifest
+    /// path; for a synthesized project (no `rackabel.toml`) it falls back to the
+    /// project root so we never point at a file that does not exist.
     fn manifest_path_string(&self) -> String {
-        self.root.join(MANIFEST_NAME).display().to_string()
+        match &self.manifest_path {
+            Some(p) => p.display().to_string(),
+            None => self.root.display().to_string(),
+        }
     }
 
     /// The project-local `[hooks]` table (DESIGN §5.5), if the manifest declares one.
@@ -461,7 +609,19 @@ impl DeviceProject {
             )
             .at(project.manifest_path_string()));
         }
-        let device = project.raw.device.expect("device present");
+        // A manifestless device opt-in (package.json `"rackabel":{"kind":"device"}`
+        // or `--type device`) passes the kind guard but has no `[device]` table.
+        // The `[device]` schema's fields (name/kind/entry) are required with no
+        // inference, so we cannot synthesize one — frame a clear error instead of
+        // panicking.
+        let Some(device) = project.raw.device else {
+            return Err(RkError::of(
+                ErrorCode::AmbiguousKind,
+                "a Max for Live device needs a [device] table — manifestless device projects aren't supported",
+                "add a rackabel.toml with a [device] table (name, kind, entry), or if this is an extension drop --type device",
+            )
+            .at(project.manifest_path_string()));
+        };
         Ok(Self {
             root: project.root,
             device,
@@ -477,6 +637,11 @@ mod tests {
 
     fn write_manifest(dir: &Path, body: &str) {
         fs::write(dir.join(MANIFEST_NAME), body).unwrap();
+    }
+
+    fn write_pkg(dir: &Path, body: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("package.json"), body).unwrap();
     }
 
     #[test]
@@ -616,6 +781,222 @@ mod tests {
         let ctx = test_ctx(&proj, true);
         let r = p.resolved_extension(&ctx).unwrap();
         assert_eq!(r.pack_targets, vec![default_pack_target()]);
+    }
+
+    // --- manifest-optional: package.json fallback anchor + default kind -------------
+
+    #[test]
+    fn discover_anchors_on_package_json_when_no_manifest() {
+        // No rackabel.toml anywhere — the nearest package.json synthesizes the project.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("pkg-only");
+        write_pkg(&proj, r#"{"name":"pkg-only"}"#);
+        let sub = proj.join("src/deep");
+        fs::create_dir_all(&sub).unwrap();
+
+        let p = Project::discover(&sub).unwrap();
+        assert_eq!(p.root, proj, "anchors at the package.json dir");
+        assert!(p.manifest_path.is_none(), "synthesized: no rackabel.toml");
+        assert!(p.pkg.is_some(), "carries the anchoring package.json");
+    }
+
+    #[test]
+    fn discover_rk0001_only_when_neither_anchor_present() {
+        let tmp = tempdir().unwrap();
+        // Neither a rackabel.toml nor a package.json up the tree → RK0001.
+        let err = Project::discover(tmp.path()).unwrap_err();
+        assert_eq!(err.code, ErrorCode::NoManifest);
+    }
+
+    #[test]
+    fn discover_manifest_wins_over_package_json() {
+        // REGRESSION: a present rackabel.toml ALWAYS wins, even when a package.json sits
+        // beside it — the manifest is the override surface, package.json only a fallback.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("both");
+        fs::create_dir_all(&proj).unwrap();
+        write_manifest(&proj, "[extension]\nname = \"FromToml\"\n");
+        write_pkg(&proj, r#"{"name":"from-pkg","rackabel":{"kind":"device"}}"#);
+
+        let p = Project::discover(&proj).unwrap();
+        assert!(p.manifest_path.is_some(), "the real manifest is the anchor");
+        // The manifest declares [extension]; the package.json's device opt-in is ignored.
+        assert_eq!(p.kind().unwrap(), Kind::Extension);
+    }
+
+    #[test]
+    fn synthesized_kind_defaults_to_extension() {
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("syn");
+        write_pkg(&proj, r#"{"name":"syn"}"#);
+        let p = Project::discover(&proj).unwrap();
+        assert!(p.manifest_path.is_none());
+        assert_eq!(p.kind().unwrap(), Kind::Extension);
+    }
+
+    #[test]
+    fn synthesized_package_json_kind_device_opts_in() {
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("dev");
+        write_pkg(&proj, r#"{"name":"dev","rackabel":{"kind":"device"}}"#);
+        let p = Project::discover(&proj).unwrap();
+        assert_eq!(p.kind().unwrap(), Kind::Device);
+    }
+
+    #[test]
+    fn kind_override_decides_when_no_conflicting_table() {
+        // A registry-supplied --type override decides the kind for a manifestless /
+        // synthesized project (and over a package.json device opt-in) — but only when
+        // the manifest declares no conflicting table (see the conflict test below).
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("ovr");
+        write_pkg(&proj, r#"{"name":"ovr","rackabel":{"kind":"device"}}"#);
+        let p = Project::discover_with_kind(&proj, Some(Kind::Extension)).unwrap();
+        assert_eq!(
+            p.kind().unwrap(),
+            Kind::Extension,
+            "override beats the package.json device opt-in"
+        );
+    }
+
+    #[test]
+    fn kind_override_conflicting_with_declared_table_errors() {
+        // FIX #3: a --type/kind_override that conflicts with a table actually declared
+        // in a present rackabel.toml is rejected (it would otherwise route to the wrong
+        // resolver and panic).
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("conflict");
+        fs::create_dir_all(&proj).unwrap();
+        write_manifest(&proj, "[extension]\nname=\"x\"\n");
+        let p = Project::discover_with_kind(&proj, Some(Kind::Device)).unwrap();
+        let err = p.kind().unwrap_err();
+        assert_eq!(err.code, ErrorCode::AmbiguousKind);
+
+        // The mirror case: --type extension over a real [device] table.
+        let proj2 = tmp.path().join("conflict2");
+        fs::create_dir_all(&proj2).unwrap();
+        write_manifest(
+            &proj2,
+            "[device]\nname=\"d\"\nkind=\"audio-effect\"\nentry=\"x.maxpat\"\n",
+        );
+        let p2 = Project::discover_with_kind(&proj2, Some(Kind::Extension)).unwrap();
+        assert_eq!(p2.kind().unwrap_err().code, ErrorCode::AmbiguousKind);
+    }
+
+    #[test]
+    fn discover_with_kind_none_is_noop() {
+        // #8: the backbone of the backward-compat claim — injecting NO override resolves
+        // identically to a plain discover for a manifest-present project. A refactor that
+        // accidentally defaulted kind_override to something would break this.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("ext");
+        fs::create_dir_all(&proj).unwrap();
+        write_manifest(&proj, "[extension]\nname=\"x\"\n");
+        let plain = Project::discover(&proj).unwrap();
+        let injected = Project::discover_with_kind(&proj, None).unwrap();
+        assert_eq!(injected.kind_override, None);
+        assert_eq!(plain.kind().unwrap(), injected.kind().unwrap());
+        assert_eq!(plain.kind().unwrap(), Kind::Extension);
+    }
+
+    #[test]
+    fn real_manifest_with_no_table_still_rk0002() {
+        // A REAL but empty rackabel.toml is a genuine user mistake — NOT the synthesized
+        // default. Only manifestless projects fall through to the Extension default.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("empty");
+        fs::create_dir_all(&proj).unwrap();
+        write_manifest(&proj, "[meta]\ndescription = \"no kind table\"\n");
+        let err = Project::discover(&proj).unwrap().kind().unwrap_err();
+        assert_eq!(err.code, ErrorCode::AmbiguousKind);
+    }
+
+    #[test]
+    fn resolved_extension_falls_back_to_package_json_fields_when_manifestless() {
+        // SYNTHESIZED (no rackabel.toml): package.json fills name/version/author/entry.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("filled");
+        write_pkg(
+            &proj,
+            r#"{"name":"pkg-name","version":"3.4.5","author":"Pkg Author",
+                "rackabel":{"entry":"src/from-pkg.ts"}}"#,
+        );
+        let p = Project::discover(&proj).unwrap();
+        assert!(p.manifest_path.is_none(), "synthesized project");
+        let ctx = test_ctx(&proj, true);
+        let r = p.resolved_extension(&ctx).unwrap();
+        assert_eq!(r.name, "pkg-name");
+        assert_eq!(r.version, semver::Version::new(3, 4, 5));
+        assert_eq!(r.author, "Pkg Author");
+        assert_eq!(r.entry, PathBuf::from("src/from-pkg.ts"));
+    }
+
+    #[test]
+    fn resolved_extension_manifestless_truly_no_table_does_not_panic() {
+        // FIX #1 + tests gap: a truly manifestless project (only package.json, NO
+        // [extension] table) resolves Ok and does NOT panic; fields come from
+        // package.json / inference.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("zero-config");
+        write_pkg(&proj, r#"{"name":"zero-config","version":"1.2.3"}"#);
+        let p = Project::discover(&proj).unwrap();
+        assert!(p.manifest_path.is_none());
+        assert!(p.raw.extension.is_none(), "no [extension] table at all");
+        let ctx = test_ctx(&proj, true);
+        let r = p.resolved_extension(&ctx).unwrap();
+        assert_eq!(r.name, "zero-config");
+        assert_eq!(r.version, semver::Version::new(1, 2, 3));
+        assert_eq!(r.entry, PathBuf::from("src/extension.ts"));
+    }
+
+    #[test]
+    fn resolved_extension_manifestless_no_rackabel_key_succeeds() {
+        // A bare package.json with NO "rackabel" key: kind defaults to Extension and
+        // resolves fine (the build-style resolve path).
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("bare-pkg");
+        write_pkg(&proj, r#"{"name":"bare-pkg"}"#);
+        let p = Project::discover(&proj).unwrap();
+        assert_eq!(p.kind().unwrap(), Kind::Extension);
+        let ctx = test_ctx(&proj, true);
+        let r = p.resolved_extension(&ctx).unwrap();
+        assert_eq!(r.name, "bare-pkg");
+        assert_eq!(r.version, semver::Version::new(0, 1, 0));
+    }
+
+    #[test]
+    fn manifestless_device_opt_in_errors_not_panics() {
+        // FIX #2: kind()==Device via package.json "rackabel".kind="device" with no
+        // [device] table returns a framed Err, NOT a panic.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("dev-no-table");
+        write_pkg(&proj, r#"{"name":"dev-no-table","rackabel":{"kind":"device"}}"#);
+        let ctx = test_ctx(&proj, true);
+        let err = DeviceProject::discover_cwd(&ctx).unwrap_err();
+        assert_eq!(err.code, ErrorCode::AmbiguousKind);
+    }
+
+    #[test]
+    fn manifest_present_does_not_leak_package_json_fields() {
+        // FIX #4 regression: a project WITH a rackabel.toml that omits `version` infers
+        // the default 0.1.0 even when an adjacent package.json declares a different
+        // version — proving package.json does NOT participate for manifest-present
+        // projects.
+        let tmp = tempdir().unwrap();
+        let proj = tmp.path().join("manifest-present");
+        fs::create_dir_all(&proj).unwrap();
+        write_manifest(&proj, "[extension]\nname=\"x\"\n");
+        write_pkg(&proj, r#"{"name":"pkg-name","version":"9.9.9","author":"Pkg"}"#);
+        let p = Project::discover(&proj).unwrap();
+        assert!(p.manifest_path.is_some());
+        let ctx = test_ctx(&proj, true);
+        let r = p.resolved_extension(&ctx).unwrap();
+        assert_eq!(r.name, "x", "manifest name wins, no package.json leak");
+        assert_eq!(
+            r.version,
+            semver::Version::new(0, 1, 0),
+            "missing version infers the 0.1.0 default, NOT package.json's 9.9.9"
+        );
     }
 
     // A bare Ctx for tests, with json on so echoes stay quiet.

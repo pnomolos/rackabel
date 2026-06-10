@@ -1519,3 +1519,56 @@ before spawning a PLUGIN hook, so a tampered hook script is refused (RK4007) rat
 A legacy entry written before this field (`hooks_digest = None`) cannot be hook-verified and
 passes (the launcher pin still applies); reinstalling records the digest. A project-local
 `[hooks]` source is the user's own code (implicit trust, no pin) and is never digest-checked.
+
+---
+
+## manifest-optional (2026-06-10)
+
+### D-111. `rackabel.toml` is now OPTIONAL — diverges from the §4.1 "single source of truth" pillar (DESIGN §4.1/§4.2/§3.2)
+
+The original §4.1 pillar — "`rackabel.toml` is the single source of truth" — made the manifest
+**mandatory**: it was simultaneously the project-root ANCHOR (discovery walks ancestors for it)
+AND the KIND declaration ([extension]/[device]/[workspace]). Every command therefore required a
+hand-written `rackabel.toml` before it would do anything, which defeats the zero-config
+single-plugin watch path (a musician with one `package.json` extension had to first author a
+manifest just to run `rackabel dev`). This milestone makes the manifest optional and reframes
+§4.1 as "the override surface (optional)". The divergence from the "single source of truth"
+wording is deliberate and recorded here.
+
+What changed (all ADDITIVE — no schema break):
+- **ANCHOR.** Project discovery still walks ancestors for `rackabel.toml` and that ALWAYS wins
+  when found (today's behavior, unchanged). Only when no `rackabel.toml` is found does discovery
+  fall back to the nearest `package.json` as the project root — a *synthesized* `Project` whose
+  every field infers. With neither anchor present, discovery still fails `RK0001`; its hint is
+  updated to mention `package.json` as the alternative anchor.
+- **KIND default.** A synthesized project (no `[extension]`/`[device]`/`[workspace]` table)
+  defaults to **Extension**. A device opts in via `rackabel dev register --type device` (kind
+  stored on the registry entry) or a `package.json` `"rackabel": { "kind": "device" }` key. A
+  REAL `rackabel.toml` that declares no recognized table is STILL the `RK0002` error (a genuine
+  authoring mistake) — only synthesized/manifestless projects get the default kind, so the
+  existing error contract is preserved for hand-written manifests.
+- **`register --type`.** `dev register` gains `--type extension|device` (defaults `extension`)
+  and now accepts a dir that has `package.json` but no `rackabel.toml`. A `--type`/registry kind
+  that CONFLICTS with a table actually declared in a present `rackabel.toml` (e.g. `--type device`
+  over a real `[extension]` table) is REJECTED with `RK0002` rather than silently routing to the
+  wrong resolver — the override may only DECIDE the kind when the manifest declares no conflicting
+  table.
+- **FIELD INFERENCE (gated).** For a *synthesized* (manifestless) project, missing `[extension]`
+  fields infer `package.json` → git/dir/default: `name`/`version`/`author`/`entry` are pulled from
+  `package.json` (and its `"rackabel"` sub-object) when the manifest leaves them empty. This
+  `package.json` field participation applies ONLY when there is no `rackabel.toml` on disk. For a
+  project WITH a `rackabel.toml`, a missing field infers exactly as before (manifest → git/dir/
+  default, e.g. a missing `version` → `0.1.0`) with NO `package.json` participation — so existing
+  manifest projects behave identically regardless of any adjacent `package.json`. A manifestless
+  project whose kind resolves to **Device** (via the `package.json` opt-in or `--type device`) has
+  no inferable `[device]` schema (its `name`/`kind`/`entry` are required with no defaults), so it
+  is rejected with a framed `RK0002` directing the user to add a `[device]` table — manifestless
+  device projects are not supported.
+
+**Rationale:** zero-config single-plugin watch — the common case (one extension in a
+`package.json` dir) needs no boilerplate manifest. **Full backward compatibility:** no schema
+break, every additive path is gated on the ABSENCE of `rackabel.toml`, so existing manifest
+projects and existing `~/.rackabel/registry.toml` files load and behave identically;
+`rackabel.toml` always wins when present and remains the single OVERRIDE surface. The §4.5
+"`manifest.json` is generated, never hand-edited" rule and the device-schema-frozen note are
+unchanged.

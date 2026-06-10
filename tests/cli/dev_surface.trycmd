@@ -43,8 +43,8 @@ Live-agnostic transcript.
 $ RACKABEL_HOME=rk-home-surface rackabel dev test --no-input
 ? 3
 error: no manifest found [RK0001]
-  --> looked for rackabel.toml in [..] and its parents
-  help: run `rackabel new` to scaffold one, or cd into a project directory
+  --> looked for rackabel.toml or package.json in [CWD] and its parents
+  help: run `rackabel new` to scaffold one, add a package.json, or cd into a project directory
 (run `rackabel explain RK0001` for details)
 
 ```

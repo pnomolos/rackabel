@@ -25,7 +25,7 @@ use notify::{RecursiveMode, Watcher};
 
 use crate::context::Ctx;
 use crate::error::{CmdResult, ErrorCode, RkError};
-use crate::manifest::Project;
+use crate::manifest::{Kind, Project};
 use crate::services::esbuild;
 use crate::ui;
 
@@ -78,6 +78,11 @@ struct EntryPlan {
     name: String,
     /// The extension project root.
     root: PathBuf,
+    /// The kind stored on the registry entry at `register --type` time, if any. Carried
+    /// into the chain so a manifestless registered project resolves without re-guessing
+    /// (Phase 5): a registered, package.json-only extension/device never has to infer its
+    /// kind at build/deploy time. `None` => fall back to manifest/synthesized resolution.
+    kind: Option<Kind>,
     /// The internal `workspace:*` libraries this extension consumes.
     libs: Vec<WorkspaceLib>,
 }
@@ -122,6 +127,11 @@ pub struct ChangeSet {
     /// rebuild + deploy + reload these (the fan-out of a library edit to all its
     /// dependents). A `BTreeMap` so the order is stable for deterministic output/tests.
     affected: BTreeMap<String, PathBuf>,
+    /// Per-affected-extension registered kind (`register --type`), keyed by name. Plumbed
+    /// from the registry entry so the chain discovers each affected project WITH its kind
+    /// (`Project::discover_with_kind`) — a manifestless registered project never guesses.
+    /// Absent / `None` => discover resolves the kind itself (manifest or synthesized default).
+    kinds: BTreeMap<String, Option<Kind>>,
 }
 
 impl ChangeSet {
@@ -161,6 +171,7 @@ pub fn plan(working_set: &[RegistryEntry], ctx: &Ctx) -> CmdResult<WatchPlan> {
         entries.push(EntryPlan {
             name: entry.name.clone(),
             root,
+            kind: entry.kind,
             libs,
         });
     }
@@ -295,12 +306,14 @@ impl WatchPlan {
                 // under node_modules and are filtered out above).
                 if path_under(path, &entry.root) {
                     cs.affected.insert(entry.name.clone(), entry.root.clone());
+                    cs.kinds.insert(entry.name.clone(), entry.kind);
                 }
                 // A dependent library's source.
                 for lib in &entry.libs {
                     let in_lib = path_under(path, &lib.src) || path_under(path, &lib.root);
                     if in_lib {
                         cs.affected.insert(entry.name.clone(), entry.root.clone());
+                        cs.kinds.insert(entry.name.clone(), entry.kind);
                         lib_set.insert(lib.root.clone(), lib.clone());
                     }
                 }
@@ -359,7 +372,13 @@ pub fn build_deploy_reload(changed: &ChangeSet, client: &mut Client, ctx: &Ctx) 
     // Build/deploy run against a project-rooted, quieted context so the chain owns the
     // single `reloaded …` line instead of build/deploy each emitting their own frames.
     for (name, root) in &changed.affected {
-        let project = Project::discover(root)?;
+        // Discover WITH the registered kind (Phase 5): a manifestless registered project
+        // carries its `register --type` kind so it never has to guess at build/deploy time.
+        // When the entry has no stored kind (`None`) or a real manifest is present, this is
+        // identical to a plain discover — `discover_with_kind(None)` sets no override and a
+        // present manifest always wins.
+        let kind = changed.kinds.get(name).copied().flatten();
+        let project = Project::discover_with_kind(root, kind)?;
         let quiet = quiet_project_ctx(ctx, &project.root);
 
         // BUILD — esbuild::build_extension is the shared 0.2 service (reused, not
@@ -419,7 +438,8 @@ pub fn build_deploy_reload(changed: &ChangeSet, client: &mut Client, ctx: &Ctx) 
 /// Resolve + run the `on_reload` hooks for each reloaded extension (§5.3): payload
 /// `{project_dir, manifest_toml, name, reload_ms, ok}`. The reload's overall `ok`/`reload_ms`
 /// (from the host's `ReloadResult`) are attributed to each affected extension. Best-effort:
-/// a project whose manifest can't be read for the payload is skipped.
+/// a manifest-present project whose file can't be parsed is skipped; a manifestless
+/// (package.json-anchored) project renders its in-memory manifest so the hook still fires.
 fn fire_on_reload_hooks(affected: &BTreeMap<String, PathBuf>, reload: &Response, ctx: &Ctx) {
     use crate::hooks::lifecycle;
     use crate::hooks::payload::{HookPayload, OnReloadPayload, manifest_toml_object};
@@ -434,12 +454,20 @@ fn fire_on_reload_hooks(affected: &BTreeMap<String, PathBuf>, reload: &Response,
         let Ok(project) = Project::discover(root) else {
             continue;
         };
-        let manifest_path = project.root.join(crate::manifest::MANIFEST_NAME);
-        let Ok(text) = std::fs::read_to_string(&manifest_path) else {
-            continue;
-        };
-        let Ok(manifest_toml) = manifest_toml_object(&text) else {
-            continue;
+        // `manifest_toml`: the on-disk rackabel.toml when the project has one; for a
+        // SYNTHESIZED (manifestless, package.json-anchored) project there is no file, so
+        // render the in-memory manifest instead. Reading-and-skipping would mean the hook
+        // NEVER fires for exactly the manifestless projects this milestone enables (#6).
+        let manifest_toml = match &project.manifest_path {
+            Some(path) => match std::fs::read_to_string(path)
+                .ok()
+                .and_then(|text| manifest_toml_object(&text).ok())
+            {
+                Some(obj) => obj,
+                None => continue,
+            },
+            None => serde_json::to_value(&project.raw)
+                .expect("ManifestRaw always renders as JSON"),
         };
         let payload = HookPayload::OnReload(OnReloadPayload {
             project_dir: project.root.display().to_string(),
@@ -975,6 +1003,14 @@ mod tests {
             path: path.to_path_buf(),
             source: crate::dev::Source::Dist,
             enabled: true,
+            kind: None,
+        }
+    }
+
+    fn entry_kind(name: &str, path: &Path, kind: Option<Kind>) -> RegistryEntry {
+        RegistryEntry {
+            kind,
+            ..entry(name, path)
         }
     }
 
@@ -1096,6 +1132,25 @@ mod tests {
         let cs = p.classify(&[ext.join("src/extension.ts")]);
         assert_eq!(cs.affected_names(), vec!["clip-renamer".to_string()]);
         assert!(cs.libs.is_empty(), "no library edit");
+    }
+
+    #[test]
+    fn classify_threads_registered_kind_into_changeset() {
+        // #7: the registered kind (from `register --type`) must ride through
+        // plan() -> EntryPlan.kind -> classify() -> ChangeSet.kinds, so a manifestless
+        // registered project carries its kind into build_deploy_reload without re-guessing.
+        let tmp = tempfile::tempdir().unwrap();
+        let ext = tmp.path().join("my-device");
+        std::fs::create_dir_all(ext.join("src")).unwrap();
+        let ctx = ctx_for(tmp.path());
+        let p = plan(&[entry_kind("my-device", &ext, Some(Kind::Device))], &ctx).unwrap();
+        let cs = p.classify(&[ext.join("src/extension.ts")]);
+        assert_eq!(cs.affected_names(), vec!["my-device".to_string()]);
+        assert_eq!(
+            cs.kinds.get("my-device").copied().flatten(),
+            Some(Kind::Device),
+            "registered kind threads into ChangeSet.kinds"
+        );
     }
 
     #[test]

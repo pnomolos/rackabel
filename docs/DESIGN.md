@@ -429,7 +429,7 @@ The headline. Detailed architecture in §3. Command-surface summary:
 | `dev start` | `rackabel dev start [--live PATH] [--foreground] [--inspect[=host:port]] [--emit-launch-config]` | Launch the managed Extension Host (replaces `dev-launch.sh`); daemonized by default. | maintainer sketch `start`; flutter/expo "managed runtime". |
 | `dev stop` | `rackabel dev stop` | Stop the daemon cleanly (forward the *correct* reload/term signal). | maintainer `stop`; avoids the wrong-PID-SIGHUP trap. |
 | `dev status` | `rackabel dev status [--json]` | Daemon state + per-extension state (registered/deployed/loaded/failed/skipped), Live + host paths, Developer Mode state, inspector state + port (when active, §7), **and the measured last-reload ms + rolling p50** so the whole-host reload cost (§3.3) is observable. | flutter doctor summary; Wrangler resolved-target echo. |
-| `dev register` | `rackabel dev register [PATH] [--recursive] [--name NAME] [--disabled]` | Add a path to the persistent registry; `--recursive` registers each `manifest`-bearing subdir (the monorepo case). **`--name` is mutually exclusive with `--recursive`** (one name cannot label N members — rejected at parse time, exit `2`); per-member renames after a recursive register are a follow-up `dev register <member-path> --name X` or a hand-edit of `registry.toml` (§3.2). | maintainer `register`/`register-parent`→ one flag; VS Code persistent registry. |
+| `dev register` | `rackabel dev register [PATH] [--type extension\|device] [--recursive] [--name NAME] [--disabled]` | Add a path to the persistent registry; the path may be a `rackabel.toml` project **or** a manifestless `package.json` dir (§4.1). `--type` supplies the kind at registration time (stored on the entry); it **defaults to `extension`** and is how a manifestless project opts into device. `--recursive` registers each `manifest`-bearing subdir (the monorepo case). **`--name` is mutually exclusive with `--recursive`** (one name cannot label N members — rejected at parse time, exit `2`); per-member renames after a recursive register are a follow-up `dev register <member-path> --name X` or a hand-edit of `registry.toml` (§3.2). | maintainer `register`/`register-parent`→ one flag; VS Code persistent registry. |
 | `dev unregister` | `rackabel dev unregister <NAME\|PATH> [--recursive]` | Remove from the registry. | maintainer `unregister`. |
 | `dev enable` | `rackabel dev enable <NAME\|PATH>` | Flip a dormant entry back to `enabled = true`. | VS Code enable/disable; one verb to flip state. |
 | `dev disable` | `rackabel dev disable <NAME\|PATH>` | Flip an entry to `enabled = false` (registered but not loaded). | VS Code enable/disable. |
@@ -854,13 +854,30 @@ surface is officially unstable and may change at GA (§9.13).
 
 ## 4. Manifest & project model
 
-### 4.1 `rackabel.toml` is the single source of truth
+### 4.1 `rackabel.toml` is the override surface (optional)
 
-One hand-edited config file; everything else is derived (Cargo convention-over-config). The
-SDK's `manifest.json` is **generated** from `rackabel.toml` on every build with a `do not
-edit` header; the user never hand-edits it (avoids the Figma/Adobe "I edited the manifest and
-nothing changed" footgun). Fields are **all optional with documented inference** — a fresh
-project builds with an essentially empty manifest (Wrangler v2; Cargo).
+A project is **anchored** by `rackabel.toml` when present, or — when it is absent — by the
+nearest `package.json` (the synthesized-project fallback). So `rackabel.toml` is **optional**:
+the zero-config single-plugin watch path needs no manifest at all (`rackabel dev` in a
+`package.json` dir just works). When present, the manifest is the single, hand-edited
+**override** surface — it always wins; when absent, *everything* infers (Cargo
+convention-over-config). The SDK's `manifest.json` is **generated** from the resolved project
+on every build with a `do not edit` header; the user never hand-edits it (avoids the
+Figma/Adobe "I edited the manifest and nothing changed" footgun). Fields are **all optional
+with documented inference** — a fresh project builds with no manifest at all, or with an
+essentially empty one (Wrangler v2; Cargo).
+
+**Kind defaults to Extension for a manifestless project.** A synthesized project (anchored by
+`package.json`, no `[extension]`/`[device]`/`[workspace]` table) is treated as an **Extension**
+unless it opts into device: either `rackabel dev register --type device` (the kind is stored on
+the registry entry) or a `package.json` `"rackabel": { "kind": "device" }` key. A *real*
+`rackabel.toml` that declares **no** recognized table is still an error (`RK0002`) — that is a
+genuine authoring mistake, distinct from a deliberately manifestless project. When neither a
+`rackabel.toml` ancestor nor a `package.json` anchor is found, discovery still fails with
+`RK0001` (its hint now mentions `package.json` as the alternative anchor). **Backward
+compatibility is total:** every existing `rackabel.toml` project and every existing
+`registry.toml` loads and behaves identically — the synthesized-project + default-kind paths
+are purely additive, and `rackabel.toml` always wins when it is present.
 
 ### 4.2 Schema — both kinds, one file
 
@@ -911,8 +928,13 @@ license = "MIT"
 categories = ["utility"]
 ```
 
-A project has **exactly one** of `[extension]` or `[device]` (a workspace can hold many
-single-kind projects — §4.4). This formalizes the conventions that today live in
+A project that *declares* a kind has **exactly one** of `[extension]` or `[device]` (a
+workspace can hold many single-kind projects — §4.4); a manifestless (synthesized) project
+declares neither and **defaults to Extension** (§4.1: device opts in via `register --type
+device` or a `package.json` `"rackabel": { "kind": "device" }` key). Every table shown above is
+optional — a project with no `rackabel.toml` at all is valid, with all fields inferred; the
+manifest exists only to **override** an inferred value or carry the `[extension.build]`/`pack`/
+`[meta]` knobs that have no inference. This formalizes the conventions that today live in
 `package.json` under `arclight*` keys (`arclightNativeDeps`, `arclightExtraDistFiles`,
 `arclightPackTargets`) and carries forward the SDK-IMPROVEMENTS wishlist fields under
 `[meta]` so rackabel can emit them into `manifest.json` the moment the SDK honors them

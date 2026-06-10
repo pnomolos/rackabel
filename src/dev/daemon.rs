@@ -517,7 +517,7 @@ impl DaemonState {
             if e.source != super::Source::Dist {
                 continue; // Deployed-source entries are already in the User Library.
             }
-            if let Err(err) = self.deploy_one(&e.path) {
+            if let Err(err) = self.deploy_one(&e.path, e.kind) {
                 self.sink.host_stdout(&format!(
                     "rackabel: failed to deploy {} before host launch: {}",
                     e.name, err.problem
@@ -527,8 +527,11 @@ impl DaemonState {
     }
 
     /// Build (if stale) + deploy a single project root, reusing the 0.2 services verbatim.
-    fn deploy_one(&self, root: &Path) -> CmdResult<()> {
-        let project = crate::manifest::Project::discover(root)?;
+    /// `kind` is the registry entry's stored `register --type` kind (if any), threaded so a
+    /// manifestless registered project resolves WITHOUT guessing (Phase 5); `None` or a real
+    /// manifest behaves exactly as a plain discover (the manifest always wins).
+    fn deploy_one(&self, root: &Path, kind: Option<crate::manifest::Kind>) -> CmdResult<()> {
+        let project = crate::manifest::Project::discover_with_kind(root, kind)?;
         let mut quiet = self.ctx.clone();
         quiet.cwd = project.root.clone();
         quiet.quiet = true;

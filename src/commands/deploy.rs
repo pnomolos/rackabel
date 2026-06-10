@@ -593,6 +593,9 @@ mod tests {
         Project {
             root: root.to_path_buf(),
             raw: crate::manifest::ManifestRaw::default(),
+            manifest_path: None,
+            pkg: None,
+            kind_override: None,
         }
     }
 

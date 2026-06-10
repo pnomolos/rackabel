@@ -340,7 +340,28 @@ pub struct DevStartArgs {
     pub emit_launch_config: bool,
 }
 
-/// `rackabel dev register [PATH] [--recursive] [--name NAME] [--disabled]`
+/// The kind a `dev register --type` supplies at registration time. Lets a project be
+/// registered without (or overriding) a manifest table — the registry stores the
+/// resolved kind so a manifestless (`package.json`-anchored) project still loads.
+/// Maps to [`crate::manifest::Kind`] via [`RegisterKind::to_manifest_kind`].
+#[derive(Clone, Copy, Debug, ValueEnum, PartialEq, Eq)]
+pub enum RegisterKind {
+    Extension,
+    Device,
+}
+
+impl RegisterKind {
+    /// Project this CLI flag onto the manifest's `Kind` (the form the registry +
+    /// project resolution speak).
+    pub fn to_manifest_kind(self) -> crate::manifest::Kind {
+        match self {
+            RegisterKind::Extension => crate::manifest::Kind::Extension,
+            RegisterKind::Device => crate::manifest::Kind::Device,
+        }
+    }
+}
+
+/// `rackabel dev register [PATH] [--recursive] [--name NAME] [--type KIND] [--disabled]`
 #[derive(Args, Debug)]
 pub struct DevRegisterArgs {
     /// Project path to register (defaults to the current directory).
@@ -356,6 +377,13 @@ pub struct DevRegisterArgs {
     /// exit 2, §3.2).
     #[arg(long, value_name = "NAME", conflicts_with = "recursive")]
     pub name: Option<String>,
+
+    /// The project kind to register as (`extension` | `device`). Supplies the kind
+    /// for a manifestless (`package.json`-anchored) project, and overrides a
+    /// manifest's table when both are present. Absent ⇒ resolve from the manifest /
+    /// the synthesized default at use time.
+    #[arg(long = "type", value_name = "KIND")]
+    pub kind: Option<RegisterKind>,
 
     /// Register but leave dormant (`enabled = false`).
     #[arg(long)]
