@@ -666,12 +666,22 @@ fn check_project_anchor(diag: &mut Diagnosis, project: Option<&Project>) {
         Kind::Device => "device",
         Kind::Workspace => "workspace",
     };
+    // The kind PROVENANCE (#10): only say "(default)" when it was actually defaulted.
+    // A package.json `"rackabel": { "kind": ... }` opt-in is an EXPLICIT choice — label it
+    // `(package.json)` so doctor doesn't claim a chosen kind was a fallback.
+    let from_pkg = proj
+        .pkg
+        .as_ref()
+        .and_then(|p| p.rackabel.as_ref())
+        .and_then(|r| r.kind.as_ref())
+        .is_some();
+    let provenance = if from_pkg { "package.json" } else { "default" };
     diag.push(
         Check::new(
             "project.manifestless",
             CheckStatus::Warn,
             format!(
-                "project: manifestless — anchored at package.json, kind={kind_str} (default)"
+                "project: manifestless — anchored at package.json, kind={kind_str} ({provenance})"
             ),
         )
         .with_help(
@@ -1494,5 +1504,68 @@ mod tests {
         diag.push(Check::new("a", CheckStatus::Warn, "w"));
         diag.push(Check::new("b", CheckStatus::Ok, "o"));
         assert_eq!(diag.exit_class(), ExitClass::Ok);
+    }
+
+    /// Build a synthesized (manifestless) project at `root` whose `package.json` holds the
+    /// given JSON body — used to exercise the kind-provenance label in check_project_anchor.
+    fn synth_project(root: &Path, pkg_json: &str) -> Project {
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("package.json"), pkg_json).unwrap();
+        Project {
+            root: root.to_path_buf(),
+            raw: crate::manifest::ManifestRaw::default(),
+            manifest_path: None,
+            pkg: crate::manifest::pkgjson::read(root),
+            kind_override: None,
+        }
+    }
+
+    #[test]
+    fn manifestless_row_says_default_when_kind_defaulted() {
+        // #10: a package.json with NO "rackabel".kind opt-in → the kind is the synthesized
+        // default (extension), so the row must read "(default)".
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = synth_project(&tmp.path().join("ext"), "{\"name\":\"ext\"}");
+        let mut diag = Diagnosis::default();
+        check_project_anchor(&mut diag, Some(&proj));
+        let row = diag
+            .checks
+            .iter()
+            .find(|c| c.id == "project.manifestless")
+            .expect("manifestless row present");
+        assert_eq!(row.status, CheckStatus::Warn);
+        assert!(
+            row.message.contains("kind=extension (default)"),
+            "got: {}",
+            row.message
+        );
+    }
+
+    #[test]
+    fn manifestless_row_says_package_json_when_kind_opted_in() {
+        // #10: an explicit package.json `"rackabel": { "kind": "device" }` is a CHOICE,
+        // not a fallback — the row must read "(package.json)", not "(default)".
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = synth_project(
+            &tmp.path().join("dev"),
+            "{\"name\":\"dev\",\"rackabel\":{\"kind\":\"device\"}}",
+        );
+        let mut diag = Diagnosis::default();
+        check_project_anchor(&mut diag, Some(&proj));
+        let row = diag
+            .checks
+            .iter()
+            .find(|c| c.id == "project.manifestless")
+            .expect("manifestless row present");
+        assert!(
+            row.message.contains("kind=device (package.json)"),
+            "got: {}",
+            row.message
+        );
+        assert!(
+            !row.message.contains("(default)"),
+            "an opted-in kind must not be labelled defaulted: {}",
+            row.message
+        );
     }
 }

@@ -281,12 +281,19 @@ fn fire_post_build_hooks(
     use crate::hooks::lifecycle;
     use crate::hooks::payload::{HookPayload, PostBuildPayload, manifest_toml_object};
 
-    let manifest_path = project.root.join(crate::manifest::MANIFEST_NAME);
-    let Ok(text) = std::fs::read_to_string(&manifest_path) else {
-        return;
-    };
-    let Ok(manifest_toml) = manifest_toml_object(&text) else {
-        return;
+    // `manifest_toml`: the on-disk rackabel.toml when the project has one; for a SYNTHESIZED
+    // (manifestless, package.json-anchored) project there is no file, so render the in-memory
+    // manifest instead — otherwise the post_build hook would NEVER fire for exactly the
+    // manifestless projects this milestone enables (#6, mirroring fire_on_reload_hooks).
+    let manifest_toml = match &project.manifest_path {
+        Some(path) => match std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| manifest_toml_object(&text).ok())
+        {
+            Some(obj) => obj,
+            None => return,
+        },
+        None => crate::hooks::payload::synthesized_manifest_toml(&project.raw),
     };
     // The project-kind string for the payload (§5.3). esbuild::build_extension only runs
     // for an Extension project, so this is "extension"; computed from kind() to stay honest

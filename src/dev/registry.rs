@@ -536,6 +536,10 @@ fn require_project_dir(path: &Path, has_kind: bool) -> CmdResult<PathBuf> {
 /// (errors — both/neither table — are ignored, leaving `None`); a `package.json`-only
 /// anchor stays `None` and is resolved (Extension by default) at use time. `root` is
 /// an already-resolved project dir.
+///
+/// A registry entry is always a SINGLE ext/device project, never a workspace root, so a
+/// resolved [`Kind::Workspace`] is mapped to `None` (#9) — persisting it would be a
+/// semantic lie (the entry is one project, not the workspace it lives in).
 fn resolve_entry_kind(root: &Path, explicit: Option<Kind>) -> Option<Kind> {
     if explicit.is_some() {
         return explicit;
@@ -543,7 +547,10 @@ fn resolve_entry_kind(root: &Path, explicit: Option<Kind>) -> Option<Kind> {
     if !root.join(MANIFEST_NAME).is_file() {
         return None;
     }
-    Project::discover(root).ok().and_then(|p| p.kind().ok())
+    match Project::discover(root).ok().and_then(|p| p.kind().ok()) {
+        Some(Kind::Workspace) => None,
+        other => other,
+    }
 }
 
 /// Every manifest-bearing directory under `root` (inclusive), shallow-walked via the
@@ -733,6 +740,38 @@ mod tests {
         assert_eq!(reg2.entries()[0].name, "my-ext");
         assert!(reg2.entries()[0].enabled);
         assert_eq!(reg2.entries()[0].source, super::super::Source::Dist);
+    }
+
+    #[test]
+    fn resolve_entry_kind_maps_workspace_to_none() {
+        // #9: a registry entry is a SINGLE ext/device project, never a workspace root.
+        // A project whose manifest declares only [workspace] resolves kind() to Workspace,
+        // which must NOT be persisted as an entry kind — it degrades to None.
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("ws-root");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join(MANIFEST_NAME),
+            "[workspace]\nmembers = [\"packages/*\"]\n",
+        )
+        .unwrap();
+        // Sanity: the project itself resolves to Workspace.
+        assert_eq!(Project::discover(&proj).unwrap().kind().unwrap(), Kind::Workspace);
+        // But the stored entry kind is None, not Some(Workspace).
+        assert_eq!(resolve_entry_kind(&proj, None), None);
+        // An explicit --type still wins (e.g. the user vouches for an extension).
+        assert_eq!(
+            resolve_entry_kind(&proj, Some(Kind::Extension)),
+            Some(Kind::Extension)
+        );
+    }
+
+    #[test]
+    fn resolve_entry_kind_reads_declared_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("ext");
+        write_project(&proj, None);
+        assert_eq!(resolve_entry_kind(&proj, None), Some(Kind::Extension));
     }
 
     #[test]

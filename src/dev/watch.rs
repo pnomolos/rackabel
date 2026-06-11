@@ -466,8 +466,7 @@ fn fire_on_reload_hooks(affected: &BTreeMap<String, PathBuf>, reload: &Response,
                 Some(obj) => obj,
                 None => continue,
             },
-            None => serde_json::to_value(&project.raw)
-                .expect("ManifestRaw always renders as JSON"),
+            None => crate::hooks::payload::synthesized_manifest_toml(&project.raw),
         };
         let payload = HookPayload::OnReload(OnReloadPayload {
             project_dir: project.root.display().to_string(),

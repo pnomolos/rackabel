@@ -155,12 +155,42 @@ fn deploy_extension(project: &Project, args: &DeployArgs, ctx: &Ctx) -> CmdResul
     Ok(())
 }
 
+/// Build the `manifest_toml` JSON object for the `pre_deploy` payload (§5.3). For a project
+/// with a real on-disk `rackabel.toml` this is the parsed file; for a SYNTHESIZED
+/// (manifestless, package.json-anchored) project there is no file, so render the in-memory
+/// [`crate::manifest::ManifestRaw`] instead — mirroring `on_reload`'s `fire_on_reload_hooks`
+/// (#6). Reading-and-aborting would mean a manifestless extension's deploy dies on the missing
+/// file, even though everything it needs is already in memory. Aborts (framed RK1304 on a
+/// read fault, RK0003 on a parse fault) only when a *present* manifest can't be read/parsed.
+fn pre_deploy_manifest_toml(project: &Project) -> CmdResult<serde_json::Value> {
+    use crate::hooks::payload::{manifest_toml_object, synthesized_manifest_toml};
+
+    match &project.manifest_path {
+        Some(path) => {
+            let text = std::fs::read_to_string(path).map_err(|e| {
+                RkError::new(
+                    ErrorCode::DeployCopyFailed,
+                    ExitClass::BuildRuntime,
+                    "could not read rackabel.toml to run the pre_deploy hooks",
+                    "check the file exists and is readable, then retry",
+                )
+                .at(path.display().to_string())
+                .raw(e.into())
+            })?;
+            manifest_toml_object(&text)
+        }
+        // Synthesized project: render the in-memory manifest so the hook still fires, with
+        // the SAME omitted-table shape as a real manifest (never explicit nulls).
+        None => Ok(synthesized_manifest_toml(&project.raw)),
+    }
+}
+
 /// Resolve + run the `pre_deploy` hooks (§5.3) before any User-Library mutation. Returns
 /// the framed veto error (RK1310, or RK1311 for a timeout) when a gate refuses; `Ok(())`
 /// when every hook (or none) allows the deploy. The payload carries the exact §5.3 fields:
-/// `{project_dir, manifest_toml, bundle_path, user_library, slug}`. A manifest that can't be
-/// read/parsed for the payload is itself a deploy-aborting error (we never deploy past a hook
-/// we couldn't even feed) — but that is the same RK0003 the rest of deploy would already hit.
+/// `{project_dir, manifest_toml, bundle_path, user_library, slug}`. The `manifest_toml` is
+/// the on-disk `rackabel.toml` when one exists, else the synthesized in-memory manifest for a
+/// manifestless project (see [`pre_deploy_manifest_toml`]) — a missing file never aborts.
 fn run_pre_deploy_hooks(
     project: &Project,
     ext: &ResolvedExtension,
@@ -170,21 +200,10 @@ fn run_pre_deploy_hooks(
     ctx: &Ctx,
 ) -> CmdResult<()> {
     use crate::hooks::lifecycle;
-    use crate::hooks::payload::{HookPayload, PreDeployPayload, manifest_toml_object};
+    use crate::hooks::payload::{HookPayload, PreDeployPayload};
 
     let _ = ext; // payload carries the parsed manifest, not the resolved extension.
-    let manifest_path = project.root.join(crate::manifest::MANIFEST_NAME);
-    let text = std::fs::read_to_string(&manifest_path).map_err(|e| {
-        RkError::new(
-            ErrorCode::DeployCopyFailed,
-            ExitClass::BuildRuntime,
-            "could not read rackabel.toml to run the pre_deploy hooks",
-            "check the file exists and is readable, then retry",
-        )
-        .at(manifest_path.display().to_string())
-        .raw(e.into())
-    })?;
-    let manifest_toml = manifest_toml_object(&text)?;
+    let manifest_toml = pre_deploy_manifest_toml(project)?;
     let payload = HookPayload::PreDeploy(PreDeployPayload {
         project_dir: project.root.display().to_string(),
         manifest_toml,
@@ -684,5 +703,46 @@ mod tests {
         let project = project_at(tmp.path());
         let bundle = tmp.path().join("dist/extension.js");
         assert!(sources_newer_than(&project, &bundle));
+    }
+
+    #[test]
+    fn pre_deploy_manifest_toml_synthesized_project_is_ok_object() {
+        // REGRESSION (the reported deploy bug): a manifestless (synthesized) project has no
+        // rackabel.toml on disk. The pre_deploy payload must STILL build (from the in-memory
+        // ManifestRaw) instead of aborting on the missing file with RK1304.
+        let tmp = tempdir().unwrap();
+        let project = project_at(tmp.path());
+        assert!(project.manifest_path.is_none());
+        let v = pre_deploy_manifest_toml(&project).expect("synthesized project must not error");
+        let obj = v.as_object().expect("manifest_toml is a JSON object");
+        // CONTRACT (§5.3): an unset table is OMITTED, never an explicit `null` — a hook
+        // tests presence. `serde_json::to_value(&ManifestRaw::default())` would have emitted
+        // `{"extension":null,"device":null,…}`; this must not. A fully-default manifest is the
+        // empty object, and in NO case may any key carry a null value.
+        assert!(
+            obj.values().all(|val| !val.is_null()),
+            "no manifest_toml key may be null (omit absent tables), got {v:?}"
+        );
+        assert!(
+            obj.is_empty(),
+            "an all-default synthesized manifest renders as {{}}, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn pre_deploy_manifest_toml_reads_on_disk_manifest() {
+        // The on-disk branch: a real rackabel.toml is parsed into the object verbatim.
+        let tmp = tempdir().unwrap();
+        let mpath = tmp.path().join(crate::manifest::MANIFEST_NAME);
+        fs::write(
+            &mpath,
+            "[extension]\nname = \"clip-renamer\"\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+        let mut project = project_at(tmp.path());
+        project.manifest_path = Some(mpath);
+        let v = pre_deploy_manifest_toml(&project).unwrap();
+        assert_eq!(v["extension"]["name"], "clip-renamer");
+        assert_eq!(v["extension"]["version"], "0.2.0");
     }
 }

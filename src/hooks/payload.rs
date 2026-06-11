@@ -164,6 +164,19 @@ pub fn manifest_toml_object(toml_text: &str) -> crate::error::CmdResult<serde_js
     Ok(serde_json::to_value(value).expect("a toml::Value always re-renders as JSON"))
 }
 
+/// The `manifest_toml` JSON object for a SYNTHESIZED (manifestless, package.json-anchored)
+/// project, which has no `rackabel.toml` on disk. Rendered from the in-memory
+/// [`crate::manifest::ManifestRaw`] through the SAME `toml -> json` path the on-disk branch
+/// uses ([`manifest_toml_object`]) — NOT `serde_json::to_value(&raw)` directly. This matters:
+/// `to_value` of an all-default `ManifestRaw` emits every absent table as an explicit `null`
+/// (`{"extension":null,"device":null,…}`), but §5.3 requires an unset table to be OMITTED so a
+/// hook can `if (manifest_toml.extension)` test presence. `toml::to_string` omits `None` fields
+/// (TOML has no null), so re-parsing yields the same omitted-table shape as a real manifest.
+pub fn synthesized_manifest_toml(raw: &crate::manifest::ManifestRaw) -> serde_json::Value {
+    let toml_text = toml::to_string(raw).expect("ManifestRaw always renders as TOML");
+    manifest_toml_object(&toml_text).expect("a rendered ManifestRaw always re-parses")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +198,41 @@ mod tests {
         assert_eq!(obj["extension"]["name"], "harmonic-lens");
         assert_eq!(obj["extension"]["version"], "0.2.0");
         assert_eq!(obj["toolchain"]["sdk"], "1.0.0");
+    }
+
+    #[test]
+    fn synthesized_manifest_toml_omits_absent_tables_never_null() {
+        use crate::manifest::ManifestRaw;
+        // The §5.3 contract: an unset table is OMITTED, never `null`. A direct
+        // `serde_json::to_value(&ManifestRaw::default())` would emit
+        // `{"extension":null,"device":null,…}`; the helper must instead yield `{}`.
+        let v = synthesized_manifest_toml(&ManifestRaw::default());
+        assert_eq!(v, serde_json::json!({}), "all-default manifest renders as {{}}, got {v:?}");
+        assert!(
+            v.as_object().unwrap().values().all(|val| !val.is_null()),
+            "no key may carry a null value"
+        );
+    }
+
+    #[test]
+    fn synthesized_manifest_toml_matches_on_disk_shape_for_same_data() {
+        use crate::manifest::{ExtensionRaw, ManifestRaw};
+        // Shape parity: a populated in-memory manifest renders to the SAME object an
+        // equivalent on-disk rackabel.toml would parse to (omitted tables, no nulls).
+        let raw = ManifestRaw {
+            extension: Some(ExtensionRaw {
+                name: Some("harmonic-lens".to_string()),
+                version: Some("0.2.0".to_string()),
+                ..ExtensionRaw::default()
+            }),
+            ..ManifestRaw::default()
+        };
+        let from_memory = synthesized_manifest_toml(&raw);
+        let from_disk =
+            manifest_toml_object("[extension]\nname = \"harmonic-lens\"\nversion = \"0.2.0\"\n")
+                .unwrap();
+        assert_eq!(from_memory, from_disk);
+        assert!(from_memory.get("device").is_none(), "absent table omitted, not null");
     }
 
     #[test]

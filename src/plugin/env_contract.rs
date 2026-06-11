@@ -60,17 +60,24 @@ pub fn build(ctx: &Ctx, project: Option<&Path>) -> BTreeMap<String, String> {
         registry_path(ctx).display().to_string(),
     );
 
-    // RACKABEL_MANIFEST / RACKABEL_PROJECT_DIR — present ONLY in a project. Unset (not
-    // empty) outside one: a plugin tests presence, never an empty string.
+    // RACKABEL_PROJECT_DIR — present in ANY project, including a manifestless
+    // (package.json-anchored) one. Unset (not empty) outside a project.
+    // RACKABEL_MANIFEST — abs path to the project rackabel.toml, but ONLY when one
+    // actually exists on disk (DESIGN §9: "if in a project"). A synthesized project has
+    // no rackabel.toml, so pointing the var at a nonexistent file would mislead a plugin
+    // that presence-tests it; leave it unset instead.
     if let Some(root) = project {
         env.insert(
             "RACKABEL_PROJECT_DIR".to_string(),
             root.display().to_string(),
         );
-        env.insert(
-            "RACKABEL_MANIFEST".to_string(),
-            root.join(MANIFEST_NAME).display().to_string(),
-        );
+        let manifest = root.join(MANIFEST_NAME);
+        if manifest.is_file() {
+            env.insert(
+                "RACKABEL_MANIFEST".to_string(),
+                manifest.display().to_string(),
+            );
+        }
     }
 
     env
@@ -155,6 +162,9 @@ mod tests {
     fn project_vars_present_only_inside_a_project() {
         let tmp = tempdir().unwrap();
         let root = tmp.path().join("my-ext");
+        std::fs::create_dir_all(&root).unwrap();
+        // A real rackabel.toml on disk: both PROJECT_DIR and MANIFEST are set.
+        std::fs::write(root.join(MANIFEST_NAME), "[extension]\nname=\"x\"\n").unwrap();
         let env = build(&ctx_in(tmp.path(), &root), Some(&root));
         assert_eq!(env["RACKABEL_PROJECT_DIR"], root.display().to_string());
         assert_eq!(
@@ -165,6 +175,35 @@ mod tests {
         for (k, v) in &env {
             assert!(!v.is_empty(), "{k} is empty — must be unset, not empty");
         }
+    }
+
+    #[test]
+    fn manifestless_project_sets_project_dir_but_not_manifest() {
+        // A synthesized (package.json-anchored) project has NO rackabel.toml on disk:
+        // RACKABEL_PROJECT_DIR is set (we are in a project), but RACKABEL_MANIFEST is
+        // UNSET — pointing it at a nonexistent file would mislead a presence-testing plugin.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("my-ext");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), "{\"name\":\"my-ext\"}").unwrap();
+        let env = build(&ctx_in(tmp.path(), &root), Some(&root));
+        assert_eq!(env["RACKABEL_PROJECT_DIR"], root.display().to_string());
+        assert!(
+            !env.contains_key("RACKABEL_MANIFEST"),
+            "no rackabel.toml on disk → RACKABEL_MANIFEST must be unset"
+        );
+    }
+
+    #[test]
+    fn resolve_project_root_anchors_on_package_json() {
+        // resolve_project_root must find a manifestless (package.json-only) project so the
+        // env contract still gets RACKABEL_PROJECT_DIR for it.
+        let tmp = tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("package.json"), "{\"name\":\"proj\"}").unwrap();
+        let c = ctx_in(tmp.path(), &root);
+        assert_eq!(resolve_project_root(&c), Some(root.clone()));
     }
 
     #[test]
